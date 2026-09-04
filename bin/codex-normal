@@ -1,0 +1,36 @@
+#!/bin/zsh
+# Launch Codex Desktop in its normal, unmodified configuration.
+#
+# This launches the app with no Boss environment set, so it uses the codex
+# binary bundled inside the app and reads ~/.codex/config.toml with no profile
+# overlay. Nothing needs to be undone to get here.
+set -euo pipefail
+
+APP="/Applications/ChatGPT.app"
+APP_ID="com.openai.codex"
+
+fail() { print -u2 "codex-normal: $1"; exit 1 }
+
+[[ -d "$APP" ]] || fail "Codex Desktop not found at $APP"
+
+# The mode is process-scoped, so a Desktop already running in Boss Mode has to
+# exit first.
+if pgrep -qf "$APP/Contents/MacOS/ChatGPT" 2>/dev/null; then
+  print "codex-normal: quitting the running Codex Desktop to switch modes..."
+  osascript -e "quit app id \"$APP_ID\"" >/dev/null 2>&1 || true
+  for _ in {1..40}; do
+    pgrep -qf "$APP/Contents/MacOS/ChatGPT" 2>/dev/null || break
+    sleep 0.25
+  done
+  pgrep -qf "$APP/Contents/MacOS/ChatGPT" 2>/dev/null \
+    && fail "Codex Desktop did not quit; close it manually and rerun"
+fi
+
+# Explicitly clear the Boss variables in case they are exported in this shell.
+env -u CODEX_CLI_PATH -u CODEX_CONFIG_PROFILE \
+  open -n -a "$APP" ${@:+--args "$@"}
+
+print "codex-normal: NORMAL mode"
+print "  codex binary : bundled in $APP"
+print "  config       : ~/.codex/config.toml (no profile overlay)"
+print "  boss mode    : codex-boss"

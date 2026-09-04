@@ -1,0 +1,26 @@
+# Upstream Codex checkout, fetched by scripts/build.sh. Never vendored.
+/upstream/
+/upstream.backup-*/
+
+# Cargo build cache and outputs. Pinned here on purpose so a build never starts
+# a second cache under the upstream checkout -- but never committed.
+/target/
+
+# Local, machine-specific config. Only the .example is published.
+/boss.config.toml
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Scratch
+*.log
+*.orig
+*.rej

@@ -1,0 +1,78 @@
+#!/bin/zsh
+# Launch Codex Desktop in Boss Mode.
+#
+# Boss Mode is selected entirely by two environment variables read at process
+# start, so the app must be relaunched to switch modes. Nothing is written to
+# your normal config and the signed app bundle is not modified. To leave Boss
+# Mode, launch normally (or use codex-normal) -- there is nothing to undo.
+set -euo pipefail
+
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+BOSS_CLI="${CODEX_BOSS_CLI:-$CODEX_HOME/boss/bin/codex}"
+BOSS_PROFILE="${CODEX_BOSS_PROFILE:-boss}"
+APP="${CODEX_APP:-/Applications/ChatGPT.app}"
+APP_ID="com.openai.codex"
+PROFILE_FILE="$CODEX_HOME/${BOSS_PROFILE}.config.toml"
+BASE_FILE="$CODEX_HOME/boss/base.md"
+
+fail() { print -u2 "codex-boss: $1"; exit 1 }
+
+[[ -x "$BOSS_CLI" ]] || fail "patched codex binary not found or not executable: $BOSS_CLI
+  build it with: scripts/build.sh"
+[[ -f "$PROFILE_FILE" ]] || fail "profile overlay missing: $PROFILE_FILE
+  install it with: scripts/install-config.sh"
+[[ -f "$BASE_FILE" ]] || fail "curated chat base missing: $BASE_FILE
+  install it with: scripts/install-config.sh"
+[[ -d "$APP" ]] || fail "Codex Desktop not found at $APP
+  set CODEX_APP if it is installed somewhere else"
+
+# Codex resolves the code-mode host as a sibling of its own executable, so the
+# patched binary has to sit next to a link to the stock one. scripts/build.sh
+# creates that link.
+[[ -e "${BOSS_CLI:h}/codex-code-mode-host" ]] || print -u2 \
+  "codex-boss: warning: codex-code-mode-host is missing next to $BOSS_CLI; code-mode tools will fail"
+
+# Confirm the binary actually runs before handing it to the app.
+BOSS_VER="$("$BOSS_CLI" --version 2>/dev/null)" || fail "patched binary will not run: $BOSS_CLI"
+
+# The Boss binary is a copy, so a Desktop update replaces the bundled one and
+# leaves this one behind. That matters more than it looks: codex-code-mode-host
+# is a link into the bundle, so after an update an old Boss binary talks to a
+# new helper. Compare the two rather than relying on memory.
+BUNDLE_VER="$("$APP/Contents/Resources/codex" --version 2>/dev/null || true)"
+DRIFTED=0
+[[ -n "$BUNDLE_VER" && "$BOSS_VER" != "$BUNDLE_VER" ]] && DRIFTED=1
+
+# The mode is process-scoped, so a Desktop already running in the other mode has
+# to exit first.
+if pgrep -qf "$APP/Contents/MacOS/ChatGPT" 2>/dev/null; then
+  print "codex-boss: quitting the running Codex Desktop to switch modes..."
+  osascript -e "quit app id \"$APP_ID\"" >/dev/null 2>&1 || true
+  for _ in {1..40}; do
+    pgrep -qf "$APP/Contents/MacOS/ChatGPT" 2>/dev/null || break
+    sleep 0.25
+  done
+  pgrep -qf "$APP/Contents/MacOS/ChatGPT" 2>/dev/null \
+    && fail "Codex Desktop did not quit; close it manually and rerun"
+fi
+
+open -n -a "$APP" \
+  --env "CODEX_CLI_PATH=$BOSS_CLI" \
+  --env "CODEX_CONFIG_PROFILE=$BOSS_PROFILE" \
+  ${@:+--args "$@"}
+
+print "codex-boss: BOSS mode"
+print "  codex binary : $BOSS_CLI  (${BOSS_VER##* })"
+print "  profile      : $BOSS_PROFILE  ($PROFILE_FILE)"
+print "  main base    : $BASE_FILE (replaces the stock Codex base)"
+print "  workers      : chat base + stock Codex base for their own model"
+if (( DRIFTED )); then
+  print -u2 ""
+  print -u2 "codex-boss: version drift"
+  print -u2 "  boss binary  : ${BOSS_VER##* }"
+  print -u2 "  app bundle   : ${BUNDLE_VER##* }"
+  print -u2 "  Codex Desktop updated; this Boss build is behind it. Normal Codex is"
+  print -u2 "  unaffected. Boss Mode may still work, but smoke-test it before trusting"
+  print -u2 "  it, and rebuild against the matching version with:"
+  print -u2 "    scripts/update.sh"
+fi

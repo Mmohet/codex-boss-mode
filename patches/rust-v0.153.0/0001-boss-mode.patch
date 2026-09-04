@@ -1,0 +1,545 @@
+diff --git a/codex-rs/config/src/loader/mod.rs b/codex-rs/config/src/loader/mod.rs
+index 48ea0d3bc..031173da0 100644
+--- a/codex-rs/config/src/loader/mod.rs
++++ b/codex-rs/config/src/loader/mod.rs
+@@ -185,7 +185,7 @@ pub async fn load_config_layers_state(
+             AbsolutePathBuf::from_absolute_path(codex_home)?,
+         )
+     };
+-    let active_user_profile = overrides.user_config_profile.clone();
++    let active_user_profile = overrides.effective_user_config_profile();
+     let ignore_managed_requirements = overrides.ignore_managed_requirements;
+     let ignore_user_config = overrides.ignore_user_config;
+     let ignore_project_config = overrides.ignore_project_config;
+diff --git a/codex-rs/config/src/state.rs b/codex-rs/config/src/state.rs
+index ea0283313..09dd17802 100644
+--- a/codex-rs/config/src/state.rs
++++ b/codex-rs/config/src/state.rs
+@@ -102,14 +102,48 @@ impl LoaderOverrides {
+     }
+ 
+     pub fn user_config_path(&self, codex_home: &Path) -> std::io::Result<AbsolutePathBuf> {
+-        match self.user_config_path.as_ref() {
+-            Some(path) => Ok(path.clone()),
+-            None => Ok(AbsolutePathBuf::resolve_path_against_base(
+-                crate::CONFIG_TOML_FILE,
++        if let Some(path) = self.user_config_path.as_ref() {
++            return Ok(path.clone());
++        }
++        if self.user_config_profile.is_none()
++            && let Some(profile) = profile_from_env()
++        {
++            return Ok(AbsolutePathBuf::resolve_path_against_base(
++                format!("{}{CONFIG_PROFILE_V2_SUFFIX}", profile.as_str()),
+                 codex_home,
+-            )),
++            ));
+         }
++        Ok(AbsolutePathBuf::resolve_path_against_base(
++            crate::CONFIG_TOML_FILE,
++            codex_home,
++        ))
++    }
++
++    /// Profile selected by `--profile`, falling back to the environment.
++    ///
++    /// The Desktop app-server is started by the application rather than by a
++    /// shell command, so there is nowhere to pass `--profile` to it. Reading the
++    /// environment here keeps profile selection in the one blessed mechanism
++    /// instead of reproducing config layering somewhere else.
++    pub fn effective_user_config_profile(&self) -> Option<ProfileV2Name> {
++        self.user_config_profile
++            .clone()
++            .or_else(profile_from_env)
++    }
++}
++
++/// Environment variable that selects a profile-v2 config when no CLI flag was given.
++pub const CODEX_CONFIG_PROFILE_ENV: &str = "CODEX_CONFIG_PROFILE";
++
++const CONFIG_PROFILE_V2_SUFFIX: &str = ".config.toml";
++
++fn profile_from_env() -> Option<ProfileV2Name> {
++    let raw = std::env::var(CODEX_CONFIG_PROFILE_ENV).ok()?;
++    let trimmed = raw.trim();
++    if trimmed.is_empty() {
++        return None;
+     }
++    trimmed.parse().ok()
+ }
+ 
+ #[derive(Debug, Clone, PartialEq)]
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index dca329ab9..822ea8c31 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -1611,6 +1611,9 @@ impl Config {
+                     Some(BaseInstructionsProvenance::Model { .. })
+                 )
+             }),
++            custom_base_replaces_stock: self
++                .features
++                .enabled(Feature::BossCustomBaseReplacesStock),
+             personality_enabled: self.features.enabled(Feature::Personality),
+             personality: self.personality,
+             model_catalog: self.model_catalog.clone(),
+diff --git a/codex-rs/core/src/context/connector_inventory.rs b/codex-rs/core/src/context/connector_inventory.rs
+new file mode 100644
+index 000000000..c068aaea2
+--- /dev/null
++++ b/codex-rs/core/src/context/connector_inventory.rs
+@@ -0,0 +1,58 @@
++use super::ContextualUserFragment;
++use codex_protocol::models::ContentItemKind;
++
++/// The connectors reachable in this session, as a name and the description each
++/// one ships with.
++///
++/// This is a runtime fact, not a rule: it says which sources exist, never which
++/// question belongs to which source. Deciding when to consult connected data is
++/// the base instructions' job. Nothing here is inferred — the text comes from
++/// each connector's own metadata, so a different installation renders whatever
++/// that person has connected, and none renders nothing.
++#[derive(Debug, Clone, PartialEq)]
++pub(crate) struct ConnectorInventory {
++    entries: Vec<(String, Option<String>)>,
++}
++
++impl ConnectorInventory {
++    pub(crate) fn new(entries: Vec<(String, Option<String>)>) -> Self {
++        Self { entries }
++    }
++}
++
++impl ContextualUserFragment for ConnectorInventory {
++    fn content_kind(&self) -> ContentItemKind {
++        ContentItemKind("apps.connector_inventory".to_string())
++    }
++
++    fn role(&self) -> &'static str {
++        "developer"
++    }
++
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<connector_inventory>", "</connector_inventory>")
++    }
++
++    fn body(&self) -> String {
++        let mut body = String::from(
++            "\nSources you can reach in this session. Each description is the one the \
++             source provides for itself.\n",
++        );
++        for (name, description) in &self.entries {
++            body.push_str("- ");
++            body.push_str(name);
++            if let Some(description) = description
++                && !description.is_empty()
++            {
++                body.push_str(" — ");
++                body.push_str(description);
++            }
++            body.push('\n');
++        }
++        body
++    }
++}
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+index 58ad8140c..0c74f1d0e 100644
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -2,6 +2,7 @@
+ 
+ mod approved_command_prefix_saved;
+ mod apps_instructions;
++mod connector_inventory;
+ mod available_plugins_instructions;
+ mod base_instructions;
+ mod compaction_summary;
+@@ -50,6 +51,7 @@ pub(crate) mod world_state;
+ pub(crate) use approved_command_prefix_saved::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
+ pub(crate) use approved_command_prefix_saved::ApprovedCommandPrefixSaved;
+ pub(crate) use apps_instructions::AppsInstructions;
++pub(crate) use connector_inventory::ConnectorInventory;
+ pub(crate) use available_plugins_instructions::AvailablePluginsInstructions;
+ pub(crate) use base_instructions::BaseInstructionsFragment;
+ pub(crate) use codex_context_fragments::AdditionalContextDeveloperFragment;
+diff --git a/codex-rs/core/src/context/world_state/connector_inventory.rs b/codex-rs/core/src/context/world_state/connector_inventory.rs
+new file mode 100644
+index 000000000..7b98f968d
+--- /dev/null
++++ b/codex-rs/core/src/context/world_state/connector_inventory.rs
+@@ -0,0 +1,50 @@
++use super::PreviousSectionState;
++use super::WorldStateSection;
++use crate::context::ConnectorInventory;
++use crate::context::ContextualUserFragment;
++
++/// Tracks the reachable connectors so the list is re-sent only when it changes.
++#[derive(Clone, Debug, Default, PartialEq)]
++pub(crate) struct ConnectorInventoryState {
++    entries: Vec<(String, Option<String>)>,
++}
++
++impl ConnectorInventoryState {
++    pub(crate) fn new(entries: Vec<(String, Option<String>)>) -> Self {
++        Self { entries }
++    }
++}
++
++impl WorldStateSection for ConnectorInventoryState {
++    const ID: &'static str = "connector_inventory";
++    type Snapshot = Vec<(String, Option<String>)>;
++
++    fn snapshot(&self) -> Self::Snapshot {
++        self.entries.clone()
++    }
++
++    fn matches_legacy_fragment(role: &str, text: &str) -> bool {
++        role == "developer" && ConnectorInventory::matches_text(text)
++    }
++
++    fn has_retained_fragment_matcher() -> bool {
++        true
++    }
++
++    fn matches_retained_fragment(role: &str, text: &str) -> bool {
++        Self::matches_legacy_fragment(role, text)
++    }
++
++    fn render_diff(
++        &self,
++        previous: PreviousSectionState<'_, Self::Snapshot>,
++    ) -> Option<Box<dyn ContextualUserFragment>> {
++        if self.entries.is_empty()
++            || matches!(previous, PreviousSectionState::Known(previous) if *previous == self.entries)
++        {
++            return None;
++        }
++
++        Some(Box::new(ConnectorInventory::new(self.entries.clone())))
++    }
++}
+diff --git a/codex-rs/core/src/context/world_state/mod.rs b/codex-rs/core/src/context/world_state/mod.rs
+index 249e4c80f..d5867763c 100644
+--- a/codex-rs/core/src/context/world_state/mod.rs
++++ b/codex-rs/core/src/context/world_state/mod.rs
+@@ -1,6 +1,7 @@
+ mod agents_md;
+ mod apps_instructions;
+ mod collaboration_mode;
++mod connector_inventory;
+ mod compact_permissions;
+ mod context_window_guidance;
+ mod environment;
+@@ -39,6 +40,7 @@ use std::fmt;
+ pub(crate) use agents_md::AgentsMdState;
+ pub(crate) use apps_instructions::AppsInstructionsState;
+ pub(crate) use collaboration_mode::CollaborationModeState;
++pub(crate) use connector_inventory::ConnectorInventoryState;
+ pub(crate) use compact_permissions::CompactPermissionsState;
+ pub(crate) use context_window_guidance::ContextWindowGuidanceState;
+ pub(crate) use environment::EnvironmentsState;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 91300365b..f81581959 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -483,6 +483,20 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+ const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
+ const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+ 
++/// True only for a worker started by the `spawn_agent` tool.
++///
++/// Boss Mode reshapes the agent a person delegates engineering work to. It must
++/// not reach the other sessions that also run as non-root agents and set their
++/// own custom base: the guardian reviewer and other `SessionSource::Internal`
++/// sessions, `/review` (`SubAgentSource::Review`), and compaction
++/// (`SubAgentSource::Compact`) each own their prompt deliberately.
++fn is_boss_worker(session_source: &SessionSource) -> bool {
++    matches!(
++        session_source,
++        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
++    )
++}
++
+ impl Session {
+     /// Spawn and initialize a new session.
+     /// Hide the concrete startup future from callers while keeping initialization lazy.
+@@ -695,12 +709,43 @@ impl Session {
+         let history_mode = conversation_history.get_history_mode(
+             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
+         );
+-        let base_instructions = config
++        let mut base_instructions = config
+             .base_instructions
+             .clone()
+             .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
+             .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
+ 
++        // Boss Mode: a spawned worker inherits the parent's custom (chat) base.
++        // Keep that, then layer the stock instructions for the model this worker
++        // actually ended up on, resolved from model metadata exactly the way a
++        // normal child resolves them. `model` is already the final selection
++        // here, so a spawn-time model or role override is reflected.
++        //
++        // Only a fresh spawn composes: `build_agent_spawn_config` copies the
++        // parent's custom base into `config.base_instructions`, while
++        // `build_agent_resume_config` clears it so a resume reads the
++        // already-composed text back from history. Gating on the config field
++        // is what keeps a resumed worker from stacking a second copy.
++        if config.features.enabled(Feature::BossHybridSubagentBase)
++            && is_boss_worker(&session_source)
++            && config.base_instructions.is_some()
++            && matches!(
++                config.base_instructions_provenance,
++                Some(BaseInstructionsProvenance::Custom)
++            )
++        {
++            let mut stock_overrides = config.to_models_manager_config();
++            stock_overrides.base_instructions = None;
++            stock_overrides.custom_base_replaces_stock = false;
++            let stock_instructions = models_manager
++                .get_model_info(model.as_str(), &stock_overrides)
++                .await
++                .get_model_instructions(config.personality);
++            if !stock_instructions.is_empty() {
++                base_instructions = format!("{base_instructions}\n\n{stock_instructions}");
++            }
++        }
++
+         // Dynamic tools are defined at thread start and persisted in rollout session metadata.
+         let dynamic_tools = if dynamic_tools.is_empty() {
+             conversation_history.get_dynamic_tools().unwrap_or_default()
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index 49502e8a6..58bbdd848 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -183,6 +183,9 @@ pub(crate) struct ModelInfoOverrides {
+     pub(crate) auto_compact_token_limit: Option<i64>,
+     pub(crate) tool_output_token_limit: Option<usize>,
+     pub(crate) base_instructions: Option<String>,
++    /// Mirrors `ModelsManagerConfig::custom_base_replaces_stock` so the
++    /// transport decision survives into per-request model info resolution.
++    pub(crate) custom_base_replaces_stock: bool,
+ }
+ 
+ impl From<ModelsManagerConfig> for ModelInfoOverrides {
+@@ -192,6 +195,7 @@ impl From<ModelsManagerConfig> for ModelInfoOverrides {
+             auto_compact_token_limit: config.model_auto_compact_token_limit,
+             tool_output_token_limit: config.tool_output_token_limit,
+             base_instructions: config.base_instructions,
++            custom_base_replaces_stock: config.custom_base_replaces_stock,
+         }
+     }
+ }
+@@ -207,6 +211,7 @@ impl ModelInfoOverrides {
+             model_auto_compact_token_limit: self.auto_compact_token_limit,
+             tool_output_token_limit: self.tool_output_token_limit,
+             base_instructions: self.base_instructions.clone(),
++            custom_base_replaces_stock: self.custom_base_replaces_stock,
+             personality,
+             personality_enabled,
+             // The models manager already owns its catalog.
+diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
+index 322dbbd56..ddad0d29f 100644
+--- a/codex-rs/core/src/session/world_state.rs
++++ b/codex-rs/core/src/session/world_state.rs
+@@ -8,6 +8,7 @@ use crate::context::TokenBudgetContext;
+ use crate::context::world_state::AgentsMdState;
+ use crate::context::world_state::AppsInstructionsState;
+ use crate::context::world_state::CollaborationModeState;
++use crate::context::world_state::ConnectorInventoryState;
+ use crate::context::world_state::CompactPermissionsState;
+ use crate::context::world_state::ContextWindowGuidanceState;
+ use crate::context::world_state::EnvironmentsInstructionsState;
+@@ -262,6 +263,27 @@ impl Session {
+             } else {
+                 false
+             };
++        // Boss Mode: which sources exist is a runtime fact, so it is rendered here
++        // rather than written into the base instructions. Names and descriptions
++        // come from each connector's own metadata; nothing about which question
++        // belongs to which source is inferred or added.
++        let connector_inventory = if turn_context
++            .config
++            .features
++            .enabled(Feature::BossConnectorInventory)
++        {
++            AppToolPolicyEvaluator::new(&turn_context.config.config_layer_stack)
++                .apply_app_enabled_state(connectors::accessible_connectors_from_mcp_tools(
++                    step_context.mcp.tools(),
++                ))
++                .into_iter()
++                .filter(|connector| connector.is_accessible && connector.is_enabled)
++                .map(|connector| (connector.name, connector.description))
++                .collect()
++        } else {
++            Vec::new()
++        };
++        world_state.add_section(ConnectorInventoryState::new(connector_inventory));
+         let apps_usage_instructions_available =
+             apps_available && turn_context.model_info().include_apps_usage_instructions;
+         world_state.add_section(AppsInstructionsState::new(
+diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
+index fdeae5c6f..6367f231d 100644
+--- a/codex-rs/features/src/lib.rs
++++ b/codex-rs/features/src/lib.rs
+@@ -153,6 +153,8 @@ pub enum Feature {
+     WebSearchCached,
+     /// Expose the extension-backed standalone web search tool.
+     StandaloneWebSearch,
++    /// Boss Mode: list the reachable connectors as a runtime context item.
++    BossConnectorInventory,
+     /// Use the legacy Landlock Linux sandbox fallback instead of the default
+     /// bubblewrap pipeline.
+     UseLegacyLandlock,
+@@ -397,6 +399,17 @@ pub enum Feature {
+     ResponsesWebsockets,
+     /// Legacy rollout flag for Responses API WebSocket transport v2 experiments.
+     ResponsesWebsocketsV2,
++
++    // Boss Mode.
++    /// Treat a custom base instruction set as a real replacement for the
++    /// model's stock instructions. Responses Lite would otherwise demote the
++    /// custom base to an additive developer input while the service-provided
++    /// identity stays active, which silently stacks both prompts.
++    BossCustomBaseReplacesStock,
++    /// Give a spawned sub-agent the inherited custom base *and* the stock
++    /// instructions for the model it actually ends up running, composed in
++    /// that order.
++    BossHybridSubagentBase,
+ }
+ 
+ impl Feature {
+@@ -1051,6 +1064,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+         stage: Stage::UnderDevelopment,
+         default_enabled: false,
+     },
++FeatureSpec {
++        id: Feature::BossConnectorInventory,
++        key: "boss_connector_inventory",
++        stage: Stage::UnderDevelopment,
++        default_enabled: false,
++    },
+     FeatureSpec {
+         id: Feature::SearchTool,
+         key: "search_tool",
+@@ -1147,6 +1166,18 @@ pub const FEATURES: &[FeatureSpec] = &[
+         stage: Stage::Stable,
+         default_enabled: true,
+     },
++    FeatureSpec {
++        id: Feature::BossCustomBaseReplacesStock,
++        key: "boss_custom_base_replaces_stock",
++        stage: Stage::UnderDevelopment,
++        default_enabled: false,
++    },
++    FeatureSpec {
++        id: Feature::BossHybridSubagentBase,
++        key: "boss_hybrid_subagent_base",
++        stage: Stage::UnderDevelopment,
++        default_enabled: false,
++    },
+     FeatureSpec {
+         id: Feature::RequestPermissionsTool,
+         key: "request_permissions_tool",
+diff --git a/codex-rs/models-manager/src/config.rs b/codex-rs/models-manager/src/config.rs
+index 6c32d548a..aff61ad4a 100644
+--- a/codex-rs/models-manager/src/config.rs
++++ b/codex-rs/models-manager/src/config.rs
+@@ -7,6 +7,10 @@ pub struct ModelsManagerConfig {
+     pub model_auto_compact_token_limit: Option<i64>,
+     pub tool_output_token_limit: Option<usize>,
+     pub base_instructions: Option<String>,
++    /// When true, `base_instructions` replaces the model's stock instructions
++    /// outright, so transports that can only *add* instructions (Responses
++    /// Lite) must be turned off for this model. Boss Mode opt-in.
++    pub custom_base_replaces_stock: bool,
+     pub personality_enabled: bool,
+     pub personality: Option<Personality>,
+     pub model_catalog: Option<ModelsResponse>,
+diff --git a/codex-rs/models-manager/src/model_info.rs b/codex-rs/models-manager/src/model_info.rs
+index b79c67b2c..fb9f04f53 100644
+--- a/codex-rs/models-manager/src/model_info.rs
++++ b/codex-rs/models-manager/src/model_info.rs
+@@ -66,6 +66,14 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
+         });
+         model_messages.instructions_template = Some(base_instructions.clone());
+         model_messages.instructions_variables = None;
++        if config.custom_base_replaces_stock {
++            // Responses Lite cannot carry an `instructions` replacement: the
++            // caller's base is demoted to an additive input item while the
++            // service keeps its own identity. Fall back to standard Responses
++            // so the custom base actually replaces the stock prompt. This is
++            // the single seam every request/tool-planning path reads.
++            model.use_responses_lite = false;
++        }
+     } else {
+         if config.personality_enabled
+             && config.personality == Some(Personality::None)
+diff --git a/codex-rs/models-manager/src/model_info_tests.rs b/codex-rs/models-manager/src/model_info_tests.rs
+index e57a5ab70..2e80d0c50 100644
+--- a/codex-rs/models-manager/src/model_info_tests.rs
++++ b/codex-rs/models-manager/src/model_info_tests.rs
+@@ -351,3 +351,58 @@ fn model_context_window_uses_model_value_without_override() {
+ 
+     assert_eq!(updated, model);
+ }
++
++fn lite_model() -> ModelInfo {
++    let mut model = model_info_from_slug("unknown-model");
++    model.use_responses_lite = true;
++    model
++}
++
++#[test]
++fn custom_base_replaces_stock_turns_off_responses_lite() {
++    let config = ModelsManagerConfig {
++        base_instructions: Some("curated chat base".to_string()),
++        custom_base_replaces_stock: true,
++        ..Default::default()
++    };
++
++    let model = with_config_overrides(lite_model(), &config);
++
++    // Responses Lite can only *add* instructions, so a base that is meant to
++    // replace the stock prompt must not go out over it.
++    assert!(!model.use_responses_lite);
++    assert_eq!(
++        model
++            .model_messages
++            .as_ref()
++            .and_then(|messages| messages.instructions_template.as_deref()),
++        Some("curated chat base"),
++    );
++}
++
++#[test]
++fn custom_base_keeps_responses_lite_when_boss_flag_is_off() {
++    // Normal Codex behaviour: a custom base alone changes nothing about transport.
++    let config = ModelsManagerConfig {
++        base_instructions: Some("curated chat base".to_string()),
++        custom_base_replaces_stock: false,
++        ..Default::default()
++    };
++
++    let model = with_config_overrides(lite_model(), &config);
++
++    assert!(model.use_responses_lite);
++}
++
++#[test]
++fn boss_flag_alone_does_not_touch_a_stock_base() {
++    let config = ModelsManagerConfig {
++        base_instructions: None,
++        custom_base_replaces_stock: true,
++        ..Default::default()
++    };
++
++    let model = with_config_overrides(lite_model(), &config);
++
++    assert!(model.use_responses_lite);
++}

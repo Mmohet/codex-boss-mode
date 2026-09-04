@@ -1,0 +1,17 @@
+Codex Boss Mode
+
+This project is an unofficial, third-party customization of OpenAI Codex. It is
+not affiliated with, endorsed by, or supported by OpenAI.
+
+The files under patches/ are modifications to OpenAI Codex
+(https://github.com/openai/codex), which is licensed under the Apache License,
+Version 2.0. Copyright 2025 OpenAI. Those patches are distributed under the same
+license; a copy is in LICENSE. No Codex source code is vendored into this
+repository -- the patches are applied to a checkout you fetch yourself.
+
+The prompt and configuration files (base.md, main.md,
+boss.config.example.toml) and the scripts under bin/ and scripts/ are original
+work by this project's authors, also released under Apache-2.0.
+
+base.md is not an official OpenAI prompt and is not claimed to be one. See
+SOURCES.md for how it was written and which third-party captures were consulted.
