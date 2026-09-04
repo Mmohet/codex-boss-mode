@@ -30,7 +30,7 @@ not vendored into this repository.
 | Capture consulted | Pinned revision | Captured |
 |---|---|---|
 | `OpenAI/gpt-5.6-sol.md` | `afb6df6912cf72c11f268bd55b0284f5b63d0fd5` | 2026-08-22 |
-| `OpenAI/Codex/gpt-5.6.md` | `48b9915063821f33489ff7da21ca448835bdd15b` | 2026-07-27 |
+| `OpenAI/Codex/gpt-5.6-sol.md` | `48b9915063821f33489ff7da21ca448835bdd15b` | 2026-07-27 |
 
 Repository: <https://github.com/asgeirtj/system_prompts_leaks>
 
@@ -65,6 +65,54 @@ web/genui/business/weather widget rules, copied tool schemas, file-download UI
 conventions, parental controls, automation product surfaces, and any environment
 path unavailable in a local Codex installation.
 
-The Codex capture was read for comparison only. A worker's Codex layer is
-resolved at runtime from the installed build's own model metadata, never from a
-captured file.
+## What was taken from the Codex capture
+
+The main agent's base *replaces* the stock Codex base rather than layering on it,
+so anything mechanical that only lived in the stock base is lost unless it is
+carried across. The Codex capture was mined for exactly that, under one rule:
+
+> Take how its tools are used. Do not take what it thinks it should be doing.
+
+The test applied to each line: *if the agent has already decided to take this
+action, does this sentence only make the action go better?* Keep it. *Does this
+sentence change whether the action is taken at all, how the request is read, how
+the task is pushed forward, or when it counts as finished?* Drop it.
+
+Carried across, rephrased:
+
+- search with `rg` / `rg --files` before `grep` or `find`, and fall back quietly;
+- issue independent tool calls together rather than serially;
+- no printed separators chaining shell commands;
+- backticks and `$()` in a command string still execute — escape with care and
+  never let a command's output expose a credential;
+- no blocking sleep or wait beyond about a minute;
+- never repurpose `$HOME` or `$CODEX_HOME` for your own value;
+- edit files with the file-editing tool, not `cat`, redirection, or a scripting
+  language, with formatting runs and bulk mechanical rewrites as the exception;
+- a dirty worktree belongs to the person: preserve, ignore what is unrelated,
+  escalate rather than clear;
+- never `git reset --hard` or `git checkout --` unasked; prefer non-interactive git;
+- name a destructive target with an explicit checked path, never `$HOME`, `~`,
+  `/`, a workspace root, a glob, or a command substitution; `mktemp -d` for
+  temporary directories; prefer the recoverable form;
+- expand a skill's short path alias before opening anything, and run or patch the
+  scripts and assets it ships rather than recreating them;
+- the renderer's contract for a clickable file link: plain label, absolute target,
+  optional line number, angle brackets when the path has spaces, no backticks, no
+  `file://` scheme, no line ranges.
+
+Deliberately not carried across: the Codex persona and writing voice, the
+commentary/final channel cadence, final-answer formatting and visualization
+taste, and the autonomy-calibration section. Also left behind are the stock
+skill *procedure* rules — when a skill must be used, who has to read it, whether
+reading may be delegated, how several are sequenced. Those are agent workflow,
+this project defines its own, and carrying both would stack two sets of rules on
+top of each other.
+
+The autonomy section is the one to be most careful about. It is what turns an
+offhand question into inspect / gather evidence / progress the task / verify /
+keep going — the employee reflex this project exists to get away from.
+
+A worker's Codex layer is still resolved at runtime from the installed build's own
+model metadata, never from a captured file. The extraction above matters only for
+the main agent, which has no stock base underneath it.
