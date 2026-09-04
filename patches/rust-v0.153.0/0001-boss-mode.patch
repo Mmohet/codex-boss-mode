@@ -69,8 +69,154 @@ index ea0283313..09dd17802 100644
  }
  
  #[derive(Debug, Clone, PartialEq)]
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 24d7988b0..cc9346161 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -642,6 +642,18 @@
+             "bedrock_setup_wizard": {
+               "type": "boolean"
+             },
++            "boss_connector_inventory": {
++              "type": "boolean"
++            },
++            "boss_custom_base_replaces_stock": {
++              "type": "boolean"
++            },
++            "boss_hybrid_subagent_base": {
++              "type": "boolean"
++            },
++            "boss_profile_role_survives_host": {
++              "type": "boolean"
++            },
+             "browser_use": {
+               "type": "boolean"
+             },
+@@ -5967,6 +5979,18 @@
+         "bedrock_setup_wizard": {
+           "type": "boolean"
+         },
++        "boss_connector_inventory": {
++          "type": "boolean"
++        },
++        "boss_custom_base_replaces_stock": {
++          "type": "boolean"
++        },
++        "boss_hybrid_subagent_base": {
++          "type": "boolean"
++        },
++        "boss_profile_role_survives_host": {
++          "type": "boolean"
++        },
+         "browser_use": {
+           "type": "boolean"
+         },
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index 8796f539b..14b129e27 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -12901,3 +12901,99 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
+ 
+     Ok(())
+ }
++
++#[tokio::test]
++async fn host_developer_instructions_replace_the_profile_role_without_the_boss_flag()
++-> std::io::Result<()> {
++    let codex_home = tempdir()?;
++    let config_toml: ConfigToml =
++        toml::from_str("developer_instructions = \"# Boss role\\n\\nHold the goal.\"")
++            .expect("profile developer instructions should parse");
++    let config = Config::load_from_base_config_with_overrides(
++        config_toml,
++        ConfigOverrides {
++            developer_instructions: Some("<app-context>host</app-context>".to_string()),
++            ..Default::default()
++        },
++        codex_home.abs(),
++    )
++    .await?;
++
++    assert_eq!(
++        config.developer_instructions.as_deref(),
++        Some("<app-context>host</app-context>"),
++        "upstream behaviour keeps the host value alone"
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn boss_flag_keeps_both_host_context_and_the_profile_role() -> std::io::Result<()> {
++    let codex_home = tempdir()?;
++    let config_toml: ConfigToml = toml::from_str(
++        "developer_instructions = \"# Boss role\\n\\nHold the goal.\"\n\n[features]\nboss_profile_role_survives_host = true\n",
++    )
++    .expect("profile developer instructions should parse");
++    let config = Config::load_from_base_config_with_overrides(
++        config_toml,
++        ConfigOverrides {
++            developer_instructions: Some("<app-context>host</app-context>".to_string()),
++            ..Default::default()
++        },
++        codex_home.abs(),
++    )
++    .await?;
++
++    assert_eq!(
++        config.developer_instructions.as_deref(),
++        Some("<app-context>host</app-context>\n\n# Boss role\n\nHold the goal."),
++        "host context comes first so the profile role is read last"
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn boss_flag_does_not_stack_the_profile_role_twice_on_resume() -> std::io::Result<()> {
++    let codex_home = tempdir()?;
++    let config_toml: ConfigToml = toml::from_str(
++        "developer_instructions = \"# Boss role\\n\\nHold the goal.\"\n\n[features]\nboss_profile_role_survives_host = true\n",
++    )
++    .expect("profile developer instructions should parse");
++    // A resumed thread hands back a host value that already carries the role.
++    let already_merged = "<app-context>host</app-context>\n\n# Boss role\n\nHold the goal.";
++    let config = Config::load_from_base_config_with_overrides(
++        config_toml,
++        ConfigOverrides {
++            developer_instructions: Some(already_merged.to_string()),
++            ..Default::default()
++        },
++        codex_home.abs(),
++    )
++    .await?;
++
++    assert_eq!(config.developer_instructions.as_deref(), Some(already_merged));
++    Ok(())
++}
++
++#[tokio::test]
++async fn boss_flag_leaves_the_profile_role_alone_when_no_host_value_arrives()
++-> std::io::Result<()> {
++    let codex_home = tempdir()?;
++    let config_toml: ConfigToml = toml::from_str(
++        "developer_instructions = \"# Boss role\\n\\nHold the goal.\"\n\n[features]\nboss_profile_role_survives_host = true\n",
++    )
++    .expect("profile developer instructions should parse");
++    let config = Config::load_from_base_config_with_overrides(
++        config_toml,
++        ConfigOverrides::default(),
++        codex_home.abs(),
++    )
++    .await?;
++
++    assert_eq!(
++        config.developer_instructions.as_deref(),
++        Some("# Boss role\n\nHold the goal."),
++        "the CLI path sends no host value, so the profile role stands alone"
++    );
++    Ok(())
++}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index dca329ab9..822ea8c31 100644
+index dca329ab9..90dc99e5a 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -1611,6 +1611,9 @@ impl Config {
@@ -83,6 +229,37 @@ index dca329ab9..822ea8c31 100644
              personality_enabled: self.features.enabled(Feature::Personality),
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
+@@ -3896,7 +3899,29 @@ impl Config {
+         let base_instructions_provenance = base_instructions
+             .as_ref()
+             .map(|_| BaseInstructionsProvenance::Custom);
+-        let developer_instructions = developer_instructions.or(cfg.developer_instructions);
++        // Boss Mode: an embedding host (the Codex desktop app) supplies its own
++        // developer instructions when it starts a thread, and plain `or` then
++        // drops the profile's role with no warning — so the same profile behaves
++        // one way under the app and another under the CLI, which sends nothing.
++        // Keep both. Host context goes first so the profile's role is the last
++        // thing read rather than being buried ahead of a large dynamic block.
++        // The containment check stops a resumed thread, whose host value may
++        // already carry the profile text, from stacking it a second time.
++        let developer_instructions =
++            if features.enabled(Feature::BossProfileRoleSurvivesHost) {
++                match (developer_instructions, cfg.developer_instructions) {
++                    (Some(host), Some(profile)) => {
++                        if host.contains(profile.trim()) {
++                            Some(host)
++                        } else {
++                            Some(format!("{host}\n\n{profile}"))
++                        }
++                    }
++                    (host, profile) => host.or(profile),
++                }
++            } else {
++                developer_instructions.or(cfg.developer_instructions)
++            };
+         let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
+         let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
+         let include_collaboration_mode_instructions =
 diff --git a/codex-rs/core/src/context/connector_inventory.rs b/codex-rs/core/src/context/connector_inventory.rs
 new file mode 100644
 index 000000000..c068aaea2
@@ -384,7 +561,7 @@ index 322dbbd56..ddad0d29f 100644
              apps_available && turn_context.model_info().include_apps_usage_instructions;
          world_state.add_section(AppsInstructionsState::new(
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index fdeae5c6f..6367f231d 100644
+index fdeae5c6f..57ad52ebc 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
 @@ -153,6 +153,8 @@ pub enum Feature {
@@ -396,7 +573,7 @@ index fdeae5c6f..6367f231d 100644
      /// Use the legacy Landlock Linux sandbox fallback instead of the default
      /// bubblewrap pipeline.
      UseLegacyLandlock,
-@@ -397,6 +399,17 @@ pub enum Feature {
+@@ -397,6 +399,22 @@ pub enum Feature {
      ResponsesWebsockets,
      /// Legacy rollout flag for Responses API WebSocket transport v2 experiments.
      ResponsesWebsocketsV2,
@@ -411,10 +588,15 @@ index fdeae5c6f..6367f231d 100644
 +    /// instructions for the model it actually ends up running, composed in
 +    /// that order.
 +    BossHybridSubagentBase,
++    /// Keep a profile's `developer_instructions` when the embedding host also
++    /// supplies its own. Without this the host's value wins outright and the
++    /// profile's role is dropped without a warning, so the same profile behaves
++    /// differently under a host that sends one and a CLI that does not.
++    BossProfileRoleSurvivesHost,
  }
  
  impl Feature {
-@@ -1051,6 +1064,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1051,6 +1069,12 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::UnderDevelopment,
          default_enabled: false,
      },
@@ -427,7 +609,7 @@ index fdeae5c6f..6367f231d 100644
      FeatureSpec {
          id: Feature::SearchTool,
          key: "search_tool",
-@@ -1147,6 +1166,18 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1147,6 +1171,24 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -440,6 +622,12 @@ index fdeae5c6f..6367f231d 100644
 +    FeatureSpec {
 +        id: Feature::BossHybridSubagentBase,
 +        key: "boss_hybrid_subagent_base",
++        stage: Stage::UnderDevelopment,
++        default_enabled: false,
++    },
++    FeatureSpec {
++        id: Feature::BossProfileRoleSurvivesHost,
++        key: "boss_profile_role_survives_host",
 +        stage: Stage::UnderDevelopment,
 +        default_enabled: false,
 +    },

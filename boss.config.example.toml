@@ -96,6 +96,12 @@ boss_hybrid_subagent_base = true
 # each source's own description — never which question belongs to which source.
 boss_connector_inventory = true
 
+# An embedding host (the Codex desktop app) sends its own developer instructions
+# when it starts a thread, and the stock merge keeps the host value and drops the
+# profile's. Without this the role below is silently absent from most desktop
+# sessions while the CLI keeps it, and the same profile behaves two ways.
+boss_profile_role_survives_host = true
+
 [features.multi_agent_v2]
 enabled = true
 # Let the Boss choose a worker's model per spawn. The hybrid base composition
@@ -116,3 +122,28 @@ their outcomes, and anything you could not do or had to change.
 # for earlier context be one call instead of a guess about which file is the
 # index.
 dedicated_tools = true
+
+# --- Competing upper-layer injections -----------------------------------------
+#
+# Anything that installs itself above this profile can contradict it, and two
+# kinds are worth checking for once Boss Mode is running:
+#
+#   * A skill whose description matches ordinary phrasing and whose body then
+#     instructs the agent to spawn sub-agents. The multi-agent guard refuses
+#     delegation "unless the user or applicable AGENTS.md/skill instructions
+#     explicitly ask" for it, so such a skill is its own authorisation: a passing
+#     mention of a PR can turn a conversation into a formal review pipeline.
+#
+#   * A plugin that injects a persona through SessionStart / UserPromptSubmit
+#     hooks. That lands on every turn rather than when a task matches it, so it
+#     sits next to this profile's base and role permanently.
+#
+# Both can be switched off for this profile alone, leaving normal Codex as it is.
+# Read a session's assembled instructions before assuming which one is at work.
+#
+# [[skills.config]]
+# name = "<skill that mandates delegation>"
+# enabled = false
+#
+# [plugins."<plugin>@<marketplace>"]
+# enabled = false

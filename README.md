@@ -1,8 +1,8 @@
 # Codex Boss Mode
 
 An **unofficial, experimental** customization of [OpenAI Codex](https://github.com/openai/codex)
-that turns the main agent into a thinking partner and pushes the engineering work
-down to spawned workers.
+that keeps the main agent a thinking partner rather than a coding agent, with
+Codex workers available as an execution capability when the work calls for one.
 
 > Not affiliated with, endorsed by, or supported by OpenAI. It patches a
 > third-party application. Expect it to break when Codex changes.
@@ -39,7 +39,7 @@ codex --profile boss
 ```
 
 You get the Boss role, the curated base as a profile-scoped instruction file,
-worker delegation settings, and the source-routing discipline in `base.md`.
+and the source-routing and tool-usage discipline in `base.md`.
 
 **What you do not get:** the stock Codex base is still underneath the main
 agent, because replacing it is what the source patch does. The curated base is
@@ -179,6 +179,7 @@ that matter:
 | `features.boss_custom_base_replaces_stock` | send the custom base as a real replacement instead of an additive layer |
 | `features.boss_hybrid_subagent_base` | give each worker the chat base plus the stock base for its own model |
 | `features.boss_connector_inventory` | render reachable data sources from their own metadata at runtime |
+| `features.boss_profile_role_survives_host` | keep this profile's role when an embedding host sends developer instructions of its own |
 | `features.multi_agent_v2.subagent_developer_instructions` | stop the Boss role from being inherited as a worker's role |
 | `memories.dedicated_tools` | use Codex's memory retrieval tools instead of grepping memory files through `exec` |
 
