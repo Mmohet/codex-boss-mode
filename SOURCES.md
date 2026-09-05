@@ -125,3 +125,9 @@ The first recorded comparison is `OpenAI/Codex/gpt-6-astra.md` against
 revision `eb47bcf82b686bc1ea0244442ce31dfa8481d2c5` on 2026-09-04. The review
 and its per-change decisions live in
 `docs/prompt-reviews/2026-09-04-gpt-6-astra.md`.
+
+The second historical comparison is Claude Code Opus 4.6 against Opus 5 at the
+same pinned revision, reviewed on 2026-09-05. It is recorded in
+`docs/prompt-reviews/2026-09-05-claude-code-opus-4.6-to-5.md` as evidence about
+agent-harness evolution only; it is not a source for copying a vendor prompt
+into `base.md` or `main.md`.

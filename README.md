@@ -109,6 +109,14 @@ It reads the version from the installed bundle, puts the upstream checkout on
 that tag, applies the patch, rebuilds, and installs. **It does not restart
 anything** — relaunch when it suits you.
 
+The launcher also keeps the command surface together:
+
+```bash
+bin/codex-boss update   # same as ./scripts/update.sh
+bin/codex-boss build    # same as ./scripts/build.sh
+bin/codex-boss          # launch Boss Mode
+```
+
 ### The patch follows versions on its own
 
 You do not need a patch set for your exact Codex version. The build always
@@ -133,8 +141,14 @@ is an observation, not a guarantee — upstream can refactor these files at any
 time.
 
 When the patch does travel to a version it was not generated against and the
-build succeeds, the adapted patch is written to `patches/rust-v<your version>/`
-as a new untracked file. Commit it to carry that version, or delete it.
+build succeeds, the adapted patch is kept under the ignored
+`.boss/state/adapted-patches/rust-v<your version>/` directory by default. This
+keeps a routine runtime update from dirtying the public release checkout. After
+review, promote it into the tracked patch sets with:
+
+```bash
+BOSS_RECORD_ADAPTED_PATCH=1 ./scripts/build.sh
+```
 
 ## No live demo
 

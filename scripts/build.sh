@@ -89,13 +89,24 @@ done
 boss_build_binary
 
 # The patch travelled to a version it was not generated against and the build
-# worked. Record that, so the repo carries a patch set for this version.
+# worked. Keep the adapted patch in ignored state by default so a routine
+# runtime update does not dirty the public release checkout. Set
+# BOSS_RECORD_ADAPTED_PATCH=1 when the adaptation has been reviewed and should
+# become a tracked patch set.
 if [[ "$PATCH_SET" != "$TARGET" ]]; then
-  mkdir -p "$REPO_ROOT/patches/$TARGET"
+  if [[ "${BOSS_RECORD_ADAPTED_PATCH:-0}" == "1" ]]; then
+    adapted_dir="$REPO_ROOT/patches/$TARGET"
+    adapted_note="recorded the adapted patch as patches/$TARGET/0001-boss-mode.patch"
+    promote_note=""
+  else
+    adapted_dir="$REPO_ROOT/.boss/state/adapted-patches/$TARGET"
+    adapted_note="kept the adapted patch in ignored state at .boss/state/adapted-patches/$TARGET/0001-boss-mode.patch"
+    promote_note="  To promote it after review: BOSS_RECORD_ADAPTED_PATCH=1 ./scripts/build.sh"
+  fi
+  mkdir -p "$adapted_dir"
   ( cd "$UPSTREAM_DIR" && git diff "$TARGET" -- codex-rs/ ) \
-    > "$REPO_ROOT/patches/$TARGET/0001-boss-mode.patch"
+    > "$adapted_dir/0001-boss-mode.patch"
   note ""
-  note "recorded the adapted patch as patches/$TARGET/0001-boss-mode.patch"
-  note "  It is a new untracked file. Commit it to carry $TARGET support, or"
-  note "  delete it if you would rather keep only the original baseline."
+  note "$adapted_note"
+  [[ -n "$promote_note" ]] && note "$promote_note"
 fi

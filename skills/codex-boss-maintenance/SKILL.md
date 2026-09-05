@@ -1,11 +1,12 @@
 ---
 name: codex-boss-maintenance
 description: >-
-  Maintain the Codex Boss Mode runtime patch or review a new Codex prompt
-  capture against the recorded baseline. Trigger only for Desktop/upstream
-  updates, patch drift or conflicts, rebuild/test requests, or explicit
-  prompt/capability maintenance. Do not trigger for ordinary Boss Mode use,
-  persona tuning, or general repository work.
+  Maintain the Codex Boss Mode runtime patch or review a new Chat, Codex,
+  Claude Code, or other agent-harness prompt capture against the recorded
+  baseline. Trigger only for Desktop/upstream updates, patch drift or
+  conflicts, rebuild/test requests, or explicit prompt/capability maintenance.
+  Do not trigger for ordinary Boss Mode use, persona tuning, or general
+  repository work.
 metadata:
   short-description: Deterministic Boss runtime updates and narrow prompt reviews
 ---
@@ -97,9 +98,22 @@ test environment changes.
 
 ## Lane B: Prompt/Capability maintenance
 
-Use this lane when a new Chat or Codex prompt capture is available or a
-capability change needs review. The input is a pinned capture path and revision,
-not a prompt to copy into runtime.
+Use this lane when a new Chat, Codex, Claude Code, or other agent-harness prompt
+capture is available or a capability change needs review. The input is a pinned
+capture path and revision, not a prompt to copy into runtime. The decision lens
+is vendor-neutral; the source path and revision are the adapter.
+
+There are two distinct maintenance outcomes:
+
+- **Boss-principle maintenance:** use any vendor's prompt to test whether the
+  current Boss principles have a real gap or whether a clearly better general
+  rule exists for Main. A newer prompt is evidence to evaluate, not an upgrade
+  to apply.
+- **Tool-mechanics maintenance:** use Codex captures as the primary source for
+  narrow mechanics such as search, shell, escaping, or test handling. Carry one
+  directly only when it is action-local, fits this environment, and is not a
+  duplicate. Mechanics from another vendor or product are candidates only after
+  checking their adaptation to this tool/runtime boundary.
 
 1. Read the baseline and candidate from the source named in the manifest. For a
    new capture, record its commit before comparing it.
@@ -116,14 +130,20 @@ not a prompt to copy into runtime.
    | `WORKER-ONLY` | autonomy, persistence, execution drive, or worker role behavior |
    | `IGNORE` | persona, product plumbing, formatting taste, duplicated policy, or anything that would broaden Main's autonomy |
 
-4. For `THINK`, `SEEK`, and `OPERATE`, decide item by item whether the current
-   Boss base already covers it. If not, state the smallest rephrased rule and
-   why it improves the owner-side outcome. A capture alone is not permission to
-   edit `base.md` or `main.md`.
-5. Record the review under `docs/prompt-reviews/YYYY-MM-DD-<model>.md`, including
+4. For `THINK` and `SEEK`, decide whether the current Boss principle is missing
+   or inferior; adopt only the smallest clearly better general rule. For
+   `OPERATE`, first check whether a narrow Codex mechanic can be carried over
+   directly. For a non-Codex mechanic, record the environment adaptation check
+   before considering adoption. A capture alone is not permission to edit
+   `base.md` or `main.md`.
+5. Before adding any rule, search the current `base.md`, `main.md`, and project
+   instructions for an equivalent semantic rule. Replace, sharpen, or remove
+   the duplicate instead of accumulating another phrasing. Keep one canonical
+   rule when the behavior is already covered.
+6. Record the review under `docs/prompt-reviews/YYYY-MM-DD-<model>.md`, including
    source revision, baseline revision, classifications, decisions, and explicit
    `base/main changed: yes|no`.
-6. Keep the SOURCES rule visible in the review: **Take how its tools are used.
+7. Keep the SOURCES rule visible in the review: **Take how its tools are used.
    Do not take what it thinks it should be doing.**
 
 ### First sample: GPT-6 Astra
@@ -146,6 +166,31 @@ The `gpt-6-astra.md` capture is the first recorded sample against
 The review must end with a small decision table and a clear result. “No prompt
 sync” is a valid result and should be recorded when the current base already
 covers the useful mechanics.
+
+### Historical sample: Claude Code 4.6 → Opus 5
+
+The Claude Code Opus 4.6 → Opus 5 comparison is a second historical sample,
+alongside GPT-5.6 → GPT-6 Astra. Treat it as evidence about agent-harness
+evolution, not as a request to import Claude Code's prompt into Boss Mode.
+
+The default decisions are:
+
+- the weakened exploratory-question gate and the newer “deliver the whole task”
+  framing are `THINK`; preserve Boss Main's discussion-to-execution boundary;
+- completion drive, persistence, and “enough information → act” behavior are
+  `WORKER-ONLY`; do not move that task worldview into Main;
+- anti-jargon, concise user-facing communication, and direct answers are
+  `THINK` only where the current Boss base leaves a concrete collaboration gap;
+  otherwise record them as covered or style-only, with no sync;
+- the stronger restriction on AgentTool/workflow use is `OPERATE`/`SEEK`; do not
+  import it over this project's explicit maintenance and delegation policy;
+- tool schemas, memory plumbing, permissions, and product-specific sections are
+  reviewed for mechanics and provenance, not copied as a vendor bundle.
+
+The sample supports a cross-vendor evolution hypothesis, but a prompt diff alone
+does not prove that it caused a particular rollout behavior. Record the missing
+causal evidence and keep `base/main changed: no` unless a concrete Boss failure
+or a clearly superior general rule justifies a separate change.
 
 ## Completion
 

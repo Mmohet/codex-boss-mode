@@ -7,6 +7,21 @@
 # Mode, launch normally (or use codex-normal) -- there is nothing to undo.
 set -euo pipefail
 
+# Keep one command surface for launch, build, and update. The installed command
+# may be a symlink into this repository, so use an explicit override/default
+# rather than relying on the symlink's location to find the project root.
+PUBLIC_REPO="${CODEX_BOSS_PUBLIC_REPO:-$HOME/Dev/codex-boss-public}"
+case "${1:-}" in
+  update)
+    shift
+    exec "$PUBLIC_REPO/scripts/update.sh" "$@"
+    ;;
+  build)
+    shift
+    exec "$PUBLIC_REPO/scripts/build.sh" "$@"
+    ;;
+esac
+
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 BOSS_CLI="${CODEX_BOSS_CLI:-$CODEX_HOME/boss/bin/codex}"
 BOSS_PROFILE="${CODEX_BOSS_PROFILE:-boss}"
