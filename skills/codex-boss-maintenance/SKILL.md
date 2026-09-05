@@ -33,6 +33,20 @@ The public checkout is the durable source of truth. The live profile, live
 prompt copies, patched binary, source checkout, and build cache are derived
 state. Preserve unrelated changes in the source checkout and public worktree.
 
+## Decision lens
+
+Before changing Boss Mode, distinguish:
+
+1. observed behavior;
+2. instruction/runtime provenance;
+3. causal evidence;
+4. architectural placement; and
+5. whether a real failure justifies the change.
+
+A newer prompt, model, tool, or upstream implementation is not itself a
+reason to change Boss Mode. Prefer preserving a known-good behavior until a
+concrete failure or clearly superior general rule justifies changing it.
+
 ## Lane A: Runtime/Patch maintenance
 
 Use this lane when Codex Desktop or the upstream Codex source changed, the Boss
