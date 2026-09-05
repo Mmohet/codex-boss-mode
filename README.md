@@ -152,11 +152,28 @@ boss.config.example.toml    profile overlay; copy to $CODEX_HOME/boss.config.tom
 bin/codex-boss              launch Codex Desktop in Boss Mode
 bin/codex-normal            launch it normally
 patches/<tag>/              source patch against that upstream tag
-scripts/                    install, build, update
+scripts/                    install, build, update, check-state, test, prompt-diff
 ```
 
 No Codex source is vendored here and no compiled binary is distributed. The
 patch is applied to a checkout you fetch yourself.
+
+## Project workspace and maintenance
+
+The repository is also the durable maintenance workspace. A new session should
+read `AGENTS.md`, then the gitignored `.boss/workspace.local.toml`, and run
+`scripts/check-state.sh --local`. Use `--remote` when live GitHub refs or the
+prompt-source revision matter. The workspace map and ownership rules are in
+[`docs/WORKSPACE.md`](docs/WORKSPACE.md).
+
+Runtime updates and prompt/capability reviews use the narrow
+[`codex-boss-maintenance` skill](skills/codex-boss-maintenance/SKILL.md). Prompt
+captures are compared as pinned diffs and classified per change; a newer Codex
+prompt is never copied wholesale into the Boss base.
+
+The public `Mmohet/codex-boss-mode` repository is the Boss release source of
+truth. The OpenAI Codex fork named in `.boss/workspace.local.toml` only preserves
+the rebuildable `boss-mode` source-development branch.
 
 ## About `base.md`
 

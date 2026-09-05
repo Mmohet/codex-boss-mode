@@ -9,6 +9,14 @@
 # Local, machine-specific config. Only the .example is published.
 /boss.config.toml
 
+# One local project manifest; it contains absolute paths and no secrets.
+/.boss/workspace.local.toml
+/.boss/*.local.toml
+
+# Local diagnostic output and fetched prompt captures.
+/.boss/state/
+/.boss/prompt-captures/
+
 # macOS
 .DS_Store
 ._*

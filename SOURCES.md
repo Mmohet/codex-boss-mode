@@ -116,3 +116,12 @@ keep going — the employee reflex this project exists to get away from.
 A worker's Codex layer is still resolved at runtime from the installed build's own
 model metadata, never from a captured file. The extraction above matters only for
 the main agent, which has no stock base underneath it.
+
+## Prompt maintenance review ledger
+
+Prompt captures are reviewed as dated diffs and are not copied into the runtime.
+The first recorded comparison is `OpenAI/Codex/gpt-6-astra.md` against
+`OpenAI/Codex/gpt-5.6.md`, both read from `asgeirtj/system_prompts_leaks` at
+revision `eb47bcf82b686bc1ea0244442ce31dfa8481d2c5` on 2026-09-04. The review
+and its per-change decisions live in
+`docs/prompt-reviews/2026-09-04-gpt-6-astra.md`.

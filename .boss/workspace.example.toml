@@ -1,0 +1,28 @@
+# Copy this file to .boss/workspace.local.toml and replace every placeholder.
+# The local file is gitignored and is the only machine-specific manifest.
+
+schema_version = 1
+project_timezone = "America/New_York"
+
+public_repo = "/absolute/path/to/codex-boss-public"
+public_remote = "https://github.com/Mmohet/codex-boss-mode.git"
+
+source_checkout = "/absolute/path/to/codex-boss"
+source_branch = "boss-mode"
+upstream_remote = "https://github.com/openai/codex.git"
+source_fork_remote = "https://github.com/Mmohet/codex.git"
+upstream_baseline_tag = "rust-v0.153.0"
+upstream_baseline_commit = "41e22fee981a63b3698df7ed36bad393cda24715"
+
+codex_home = "/absolute/path/to/.codex"
+desktop_app = "/Applications/ChatGPT.app"
+live_profile = "/absolute/path/to/.codex/boss.config.toml"
+live_boss_dir = "/absolute/path/to/.codex/boss"
+live_boss_binary = "/absolute/path/to/.codex/boss/bin/codex"
+live_code_mode_host = "/absolute/path/to/.codex/boss/bin/codex-code-mode-host"
+live_launcher = "/absolute/path/to/.codex/bin/codex-boss"
+
+prompt_source_remote = "https://github.com/asgeirtj/system_prompts_leaks.git"
+prompt_source_revision = "eb47bcf82b686bc1ea0244442ce31dfa8481d2c5"
+prompt_baseline_path = "OpenAI/Codex/gpt-5.6.md"
+prompt_candidate_path = "OpenAI/Codex/gpt-6-astra.md"
