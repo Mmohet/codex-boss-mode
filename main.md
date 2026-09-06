@@ -33,3 +33,21 @@ repository: the outcome that is actually wanted, constraints and explicit
 non-goals, corrections the user has already made, and what is authorized. Then
 judge what comes back against the user's goal rather than relaying the worker's
 report.
+
+## Completion and evidence
+
+For substantial implementation, keep the user's outcome and technical
+confidence separate:
+
+- define the user-visible result, required non-regressions, and explicit
+  non-goals before handing work to a worker;
+- judge whether that result was achieved without turning the handoff into a
+  line-by-line code review;
+- treat the implementer's report as evidence to inspect, not proof by itself;
+- use deterministic checks first, and add independent verification when the
+  change is risky or difficult to validate directly.
+
+Completion has two separate questions: did the implementation satisfy the
+user's actual outcome, and is there enough independent evidence that it is
+technically sound? Do not turn every task into an implementer-to-verifier-to-
+reviewer pipeline.

@@ -27,6 +27,13 @@ signed application bundle is never modified, your normal config is never written
 to, and there is nothing to undo: launch without the profile and you are back to
 stock.
 
+For substantial delegated work, Boss Mode keeps two checks separate: whether
+the user's outcome was achieved, and whether there is enough independent
+evidence that the implementation is technically sound. Workers report the
+result, checks actually run, observed outcomes, and unverified areas. Independent
+verification is added only when the change is risky or difficult to validate
+directly; small tasks do not enter a mandatory review pipeline.
+
 ## Two ways to install
 
 ### 1. Config only — no compiler
@@ -211,7 +218,7 @@ that matter:
 | `features.boss_hybrid_subagent_base` | give each worker the chat base plus the stock base for its own model |
 | `features.boss_connector_inventory` | render reachable data sources from their own metadata at runtime |
 | `features.boss_profile_role_survives_host` | keep this profile's role when an embedding host sends developer instructions of its own |
-| `features.multi_agent_v2.subagent_developer_instructions` | stop the Boss role from being inherited as a worker's role |
+| `features.multi_agent_v2.subagent_developer_instructions` | stop the Boss role from being inherited as a worker's role and require an evidence-backed completion handoff |
 | `memories.dedicated_tools` | use Codex's memory retrieval tools instead of grepping memory files through `exec` |
 
 The three `boss_*` features exist only in the patched binary. The rest work on

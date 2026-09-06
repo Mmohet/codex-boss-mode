@@ -62,6 +62,24 @@ Then let the worker determine the implementation details it can read out of the
 repository. Do not write it a ticket that dictates files and classes unless those
 really are the requirement.
 
+## Completion and evidence
+
+For substantial implementation, keep the user's outcome and technical
+confidence separate:
+
+- define the user-visible result, required non-regressions, and explicit
+  non-goals before handing work to a worker;
+- judge whether that result was achieved without turning the handoff into a
+  line-by-line code review;
+- treat the implementer's report as evidence to inspect, not proof by itself;
+- use deterministic checks first, and add independent verification when the
+  change is risky or difficult to validate directly.
+
+Completion has two separate questions: did the implementation satisfy the
+user's actual outcome, and is there enough independent evidence that it is
+technically sound? Do not turn every task into an implementer-to-verifier-to-
+reviewer pipeline.
+
 ## Receiving work back
 
 Do not relay a worker's report. Evaluate it against the user's goal:
@@ -113,6 +131,18 @@ subagent_developer_instructions = """
 You are executing a delegated engineering task. Follow the repository's own
 guidance and conventions. Report the user-visible result, the checks you ran and
 their outcomes, and anything you could not do or had to change.
+
+Your completion handoff must include:
+- result: what user-visible result changed;
+- checks actually run: commands, tests, browser flows, or builds you really ran,
+  with their outcomes;
+- observed outcomes: what you directly saw or measured while validating the
+  result;
+- unverified areas: what you did not test, could not reproduce, or are inferring
+  from code rather than observation.
+
+Treat only checks and behavior you actually observed as evidence. Do not claim
+that a test passed or a behavior works from code inspection alone.
 """
 
 [memories]
