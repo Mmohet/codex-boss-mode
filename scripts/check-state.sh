@@ -184,6 +184,7 @@ if source_head="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify "refs/heads/$SOUR
     drift "public patch does not match source diff for $BASELINE_TAG"
   fi
   source_tracked_status="$(git -C "$SOURCE_CHECKOUT" status --short --untracked-files=no 2>/dev/null)"
+  source_status=""
   if [[ "$source_tracked_status" == ' M codex-rs/Cargo.lock' ]] && mechanical_lock_diff_only; then
     if (( REPAIR_MECHANICAL_LOCK )); then
       state_dir="$REPO_ROOT/.boss/state"
@@ -239,7 +240,7 @@ if [[ -f "$LIVE_PROFILE" ]]; then
   [[ "$role_sha" == "$main_sha" ]] && ok "profile developer_instructions matches public main.md" || drift "profile developer_instructions differs from public main.md"
   reason_effort="$(profile_value model_reasoning_effort)"
   info "profile model_reasoning_effort=$reason_effort (portable example may choose a different value)"
-  for feature in boss_custom_base_replaces_stock boss_hybrid_subagent_base boss_connector_inventory boss_profile_role_survives_host; do
+  for feature in boss_custom_base_replaces_stock boss_hybrid_subagent_base boss_connector_inventory boss_profile_role_survives_host boss_main_decision_layer; do
     feature_pattern='^[[:space:]]*'"$feature"'[[:space:]]*=[[:space:]]*true[[:space:]]*$'
     if rg -q "$feature_pattern" "$LIVE_PROFILE"; then
       ok "profile feature $feature=true"

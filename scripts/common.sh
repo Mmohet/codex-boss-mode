@@ -122,10 +122,19 @@ boss_build_binary() {
 
   mkdir -p "${BOSS_CLI:h}"
   cp "$built" "$BOSS_CLI"
+  # macOS may reject a copied ad-hoc-signed Mach-O at the live path until its
+  # signature is refreshed. This does not touch the signed Desktop bundle.
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "$BOSS_CLI" >/dev/null 2>&1 \
+      || fail "could not ad-hoc sign the installed Boss binary at $BOSS_CLI"
+  fi
   ln -sfn "$APP/Contents/Resources/codex-code-mode-host" "${BOSS_CLI:h}/codex-code-mode-host"
 
+  local installed_version
+  installed_version=$("$BOSS_CLI" --version) \
+    || fail "the installed Boss binary will not run: $BOSS_CLI"
   note ""
-  note "installed $("$BOSS_CLI" --version | sed 's/.* //') -> $BOSS_CLI"
+  note "installed ${installed_version##* } -> $BOSS_CLI"
   note "  A running Codex Desktop still holds the previous binary. Nothing was"
   note "  restarted. Launch Boss Mode with bin/codex-boss whenever it suits you."
 }

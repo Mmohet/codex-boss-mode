@@ -34,6 +34,14 @@ result, checks actually run, observed outcomes, and unverified areas. Independen
 verification is added only when the change is risky or difficult to validate
 directly; small tasks do not enter a mandatory review pipeline.
 
+The full Boss profile also keeps the root Main in the decision layer: its shell
+remains available for read-only repository and connected-source retrieval, while
+patch, permission-escalation, and code-mode execution surfaces are removed from
+the root tool set. Spawned Workers retain the execution tools and their stock
+Codex base. This is a profile-scoped runtime boundary, not an operating-system
+security sandbox; external connectors and MCP tools continue to follow their own
+runtime permissions.
+
 ## Two ways to install
 
 ### 1. Config only — no compiler

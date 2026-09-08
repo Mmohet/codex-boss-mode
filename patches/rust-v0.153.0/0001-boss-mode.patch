@@ -216,10 +216,27 @@ index 8796f539b..14b129e27 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index dca329ab9..90dc99e5a 100644
+index dca329ab9..cc5c23978 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -1611,6 +1611,9 @@ impl Config {
+@@ -644,6 +644,16 @@ pub struct Config {
+     /// Effective permission configuration for shell tool execution.
+     pub permissions: Permissions,
+ 
++    /// Original permissions to restore for Boss workers after the root
++    /// decision layer narrows its own filesystem access. This is runtime-only
++    /// state and is never loaded from or written to config files.
++    pub(crate) boss_main_worker_permission_profile: Option<PermissionProfileSnapshot>,
++
++    /// Stock instructions appended to the current Boss worker base. Keeping
++    /// the exact suffix lets a nested spawn replace it when its final model
++    /// changes instead of mixing two models' stock prompts.
++    pub(crate) boss_hybrid_stock_instructions: Option<String>,
++
+     /// Whether config explicitly selected named permissions profiles instead
+     /// of the legacy `sandbox_mode` syntax.
+     pub explicit_permission_profile_mode: bool,
+@@ -1611,6 +1621,9 @@ impl Config {
                      Some(BaseInstructionsProvenance::Model { .. })
                  )
              }),
@@ -229,7 +246,7 @@ index dca329ab9..90dc99e5a 100644
              personality_enabled: self.features.enabled(Feature::Personality),
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
-@@ -3896,7 +3899,29 @@ impl Config {
+@@ -3896,7 +3909,29 @@ impl Config {
          let base_instructions_provenance = base_instructions
              .as_ref()
              .map(|_| BaseInstructionsProvenance::Custom);
@@ -260,6 +277,15 @@ index dca329ab9..90dc99e5a 100644
          let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
          let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
          let include_collaboration_mode_instructions =
+@@ -4155,6 +4190,8 @@ impl Config {
+                 windows_sandbox_mode,
+                 windows_sandbox_private_desktop,
+             },
++            boss_main_worker_permission_profile: None,
++            boss_hybrid_stock_instructions: None,
+             explicit_permission_profile_mode,
+             custom_permission_profiles,
+             approvals_reviewer: constrained_approvals_reviewer.value(),
 diff --git a/codex-rs/core/src/context/connector_inventory.rs b/codex-rs/core/src/context/connector_inventory.rs
 new file mode 100644
 index 000000000..c068aaea2
@@ -421,10 +447,10 @@ index 249e4c80f..d5867763c 100644
  pub(crate) use context_window_guidance::ContextWindowGuidanceState;
  pub(crate) use environment::EnvironmentsState;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 91300365b..f81581959 100644
+index 91300365b..5c9a411a6 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -483,6 +483,20 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+@@ -483,6 +483,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
  const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
  const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
  
@@ -442,10 +468,61 @@ index 91300365b..f81581959 100644
 +    )
 +}
 +
++/// Narrow only the root Boss session's local filesystem permissions. The
++/// original profile is carried in the runtime config so a spawned Worker can
++/// regain the user's configured execution permissions without changing normal
++/// Codex sessions or treating this as an operating-system security boundary.
++fn apply_boss_main_decision_layer(
++    config: &mut Config,
++    session_source: &SessionSource,
++) -> CodexResult<()> {
++    if !config.features.enabled(Feature::BossMainDecisionLayer)
++        || session_source.is_non_root_agent()
++    {
++        return Ok(());
++    }
++
++    let original_snapshot = config.permissions.permission_profile_state().snapshot();
++    let original_profile = original_snapshot.permission_profile().clone();
++    let Some(intersected_read_only) = original_profile.intersect_with_read_only() else {
++        // An external sandbox owns filesystem enforcement outside Codex. Keep
++        // its existing policy, while tool planning still removes direct patch
++        // and code-mode execution surfaces for the root Boss.
++        warn!("Boss decision-layer filesystem isolation is unavailable under an external sandbox");
++        return Ok(());
++    };
++    let read_only_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
++        SandboxEnforcement::Managed,
++        &intersected_read_only.file_system_sandbox_policy(),
++        original_profile.network_sandbox_policy(),
++    );
++    config
++        .permissions
++        .set_permission_profile(read_only_profile.clone())
++        .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
++    if let Some(network) = config.permissions.network.as_ref() {
++        config.permissions.network = Some(
++            network
++                .recompute_for_permission_profile(&read_only_profile)
++                .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?,
++        );
++    }
++    config.boss_main_worker_permission_profile = Some(original_snapshot);
++    Ok(())
++}
++
  impl Session {
      /// Spawn and initialize a new session.
      /// Hide the concrete startup future from callers while keeping initialization lazy.
-@@ -695,12 +709,43 @@ impl Session {
+@@ -569,6 +626,7 @@ impl Session {
+         config
+             .startup_warnings
+             .extend(user_instruction_provider_warnings);
++        apply_boss_main_decision_layer(&mut config, &session_source)?;
+         let exec_policy = if crate::guardian::is_basic_session_source(&session_source) {
+             let managed_policy = config
+                 .config_layer_stack
+@@ -695,12 +753,47 @@ impl Session {
          let history_mode = conversation_history.get_history_mode(
              requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
          );
@@ -482,14 +559,51 @@ index 91300365b..f81581959 100644
 +                .get_model_info(model.as_str(), &stock_overrides)
 +                .await
 +                .get_model_instructions(config.personality);
-+            if !stock_instructions.is_empty() {
-+                base_instructions = format!("{base_instructions}\n\n{stock_instructions}");
-+            }
++            strip_boss_stock_instructions(
++                &mut base_instructions,
++                config.boss_hybrid_stock_instructions.as_deref(),
++            );
++            append_boss_stock_instructions(&mut base_instructions, &stock_instructions);
++            Arc::make_mut(&mut config).boss_hybrid_stock_instructions =
++                (!stock_instructions.is_empty()).then_some(stock_instructions);
 +        }
 +
          // Dynamic tools are defined at thread start and persisted in rollout session metadata.
          let dynamic_tools = if dynamic_tools.is_empty() {
              conversation_history.get_dynamic_tools().unwrap_or_default()
+@@ -841,6 +934,32 @@ impl Session {
+     }
+ }
+ 
++pub(crate) fn strip_boss_stock_instructions(
++    base_instructions: &mut String,
++    stock_instructions: Option<&str>,
++) {
++    let Some(stock_instructions) = stock_instructions.filter(|stock| !stock.is_empty()) else {
++        return;
++    };
++    let suffix = format!("\n\n{stock_instructions}");
++    if let Some(stripped) = base_instructions.strip_suffix(&suffix) {
++        base_instructions.truncate(stripped.len());
++    }
++}
++
++pub(crate) fn append_boss_stock_instructions(
++    base_instructions: &mut String,
++    stock_instructions: &str,
++) {
++    if stock_instructions.is_empty() {
++        return;
++    }
++    let suffix = format!("\n\n{stock_instructions}");
++    if !base_instructions.ends_with(&suffix) {
++        base_instructions.push_str(&suffix);
++    }
++}
++
+ impl SessionIo {
+     /// Submit the `op` wrapped in a `Submission` with a unique ID.
+     pub(crate) async fn submit(&self, op: Op) -> CodexResult<String> {
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
 index 49502e8a6..58bbdd848 100644
 --- a/codex-rs/core/src/session/step_settings.rs
@@ -520,6 +634,64 @@ index 49502e8a6..58bbdd848 100644
              personality,
              personality_enabled,
              // The models manager already owns its catalog.
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index b5931b330..04dcaa0e0 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -1674,6 +1674,53 @@ async fn get_base_instructions_no_user_content() {
+     }
+ }
+ 
++#[test]
++fn nested_boss_worker_hybrid_base_does_not_duplicate_same_stock_instructions() {
++    let mut base = "Boss chat base\n\nStock Codex base".to_string();
++    super::strip_boss_stock_instructions(&mut base, Some("Stock Codex base"));
++    super::append_boss_stock_instructions(&mut base, "Stock Codex base");
++    assert_eq!(base, "Boss chat base\n\nStock Codex base");
++}
++
++#[test]
++fn hybrid_base_replaces_stock_instructions_for_a_different_model() {
++    let mut base = "Boss chat base\n\nStock model A base".to_string();
++    super::strip_boss_stock_instructions(&mut base, Some("Stock model A base"));
++    super::append_boss_stock_instructions(&mut base, "Stock model B base");
++    assert_eq!(base, "Boss chat base\n\nStock model B base");
++}
++
++#[tokio::test]
++async fn boss_main_decision_layer_narrows_root_and_records_worker_permissions() {
++    let mut config = test_config().await;
++    let original_profile = config.permissions.permission_profile().clone();
++    config
++        .features
++        .enable(Feature::BossMainDecisionLayer)
++        .expect("Boss decision-layer feature should be enabled");
++
++    super::apply_boss_main_decision_layer(&mut config, &SessionSource::Cli)
++        .expect("root Boss permissions should be narrowed");
++
++    let narrowed_profile = config.permissions.permission_profile();
++    assert_eq!(narrowed_profile.enforcement(), SandboxEnforcement::Managed);
++    assert!(
++        narrowed_profile
++            .file_system_sandbox_policy()
++            .entries
++            .iter()
++            .all(|entry| entry.access != FileSystemAccessMode::Write)
++    );
++    assert_eq!(
++        config
++            .boss_main_worker_permission_profile
++            .as_ref()
++            .expect("worker permission snapshot should be retained")
++            .permission_profile(),
++        &original_profile
++    );
++}
++
+ #[tokio::test]
+ async fn reload_user_config_layer_updates_effective_apps_config() {
+     let (session, _turn_context) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
 index 322dbbd56..ddad0d29f 100644
 --- a/codex-rs/core/src/session/world_state.rs
@@ -560,8 +732,278 @@ index 322dbbd56..ddad0d29f 100644
          let apps_usage_instructions_available =
              apps_available && turn_context.model_info().include_apps_usage_instructions;
          world_state.add_section(AppsInstructionsState::new(
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_common.rs b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
+index 77442ad43..0a7a02702 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_common.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
+@@ -4,10 +4,12 @@ use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
+ use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
+ use crate::function_tool::FunctionCallError;
+ use crate::session::session::Session;
++use crate::session::strip_boss_stock_instructions;
+ use crate::session::turn_context::TurnContext;
+ use crate::tools::context::FunctionToolOutput;
+ use crate::tools::context::ToolOutput;
+ use crate::tools::context::ToolPayload;
++use codex_features::Feature;
+ use codex_models_manager::manager::RefreshStrategy;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ThreadId;
+@@ -15,6 +17,7 @@ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::models::BaseInstructions;
++use codex_protocol::models::BaseInstructionsProvenance;
+ use codex_protocol::models::ResponseInputItem;
+ use codex_protocol::openai_models::ModelPreset;
+ use codex_protocol::openai_models::ReasoningEffort;
+@@ -179,8 +182,21 @@ pub(crate) fn build_agent_spawn_config(
+     turn: &TurnContext,
+ ) -> Result<Config, FunctionCallError> {
+     let mut config = build_agent_shared_config(turn)?;
+-    config.base_instructions = Some(base_instructions.text.clone());
++    let mut base_text = base_instructions.text.clone();
++    if config.features.enabled(Feature::BossHybridSubagentBase)
++        && matches!(
++            base_instructions.provenance,
++            Some(BaseInstructionsProvenance::Custom)
++        )
++    {
++        strip_boss_stock_instructions(
++            &mut base_text,
++            turn.config.boss_hybrid_stock_instructions.as_deref(),
++        );
++    }
++    config.base_instructions = Some(base_text);
+     config.base_instructions_provenance = base_instructions.provenance.clone();
++    config.boss_hybrid_stock_instructions = None;
+     Ok(config)
+ }
+ 
+@@ -247,14 +263,25 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
+     #[allow(deprecated)]
+     let turn_cwd = turn.cwd.clone();
+     config.cwd = turn_cwd;
++    let permission_snapshot = if turn.config.features.enabled(Feature::BossMainDecisionLayer) {
++        turn.config
++            .boss_main_worker_permission_profile
++            .clone()
++            .unwrap_or_else(|| {
++                turn.config
++                    .permissions
++                    .permission_profile_state()
++                    .snapshot()
++            })
++    } else {
++        turn.config
++            .permissions
++            .permission_profile_state()
++            .snapshot()
++    };
+     config
+         .permissions
+-        .set_permission_profile_from_session_snapshot(
+-            turn.config
+-                .permissions
+-                .permission_profile_state()
+-                .snapshot(),
+-        )
++        .set_permission_profile_from_session_snapshot(permission_snapshot)
+         .map_err(|err| {
+             FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
+         })?;
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 0979e8b1e..f3df63797 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -4463,6 +4463,39 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
+     assert_eq!(config, expected);
+ }
+ 
++#[tokio::test]
++async fn build_agent_spawn_config_restores_boss_worker_permissions() {
++    let (_session, mut turn) = make_session_and_context().await;
++    let worker_profile = PermissionProfile::workspace_write();
++    let mut config = (*turn.config).clone();
++    config
++        .features
++        .enable(Feature::BossMainDecisionLayer)
++        .expect("Boss decision-layer feature should be enabled");
++    config
++        .features
++        .enable(Feature::BossHybridSubagentBase)
++        .expect("Boss hybrid feature should be enabled");
++    config.boss_main_worker_permission_profile =
++        Some(PermissionProfileSnapshot::legacy(worker_profile.clone()));
++    config.boss_hybrid_stock_instructions = Some("Stock worker A".to_string());
++    config
++        .permissions
++        .set_permission_profile(PermissionProfile::read_only())
++        .expect("root profile should accept read-only permissions");
++    turn.config = Arc::new(config);
++
++    let base_instructions = BaseInstructions {
++        text: "base\n\nStock worker A".to_string(),
++        provenance: Some(BaseInstructionsProvenance::Custom),
++    };
++    let child = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
++
++    assert_eq!(child.permissions.permission_profile(), &worker_profile);
++    assert_eq!(child.base_instructions.as_deref(), Some("base"));
++    assert_eq!(child.boss_hybrid_stock_instructions, None);
++}
++
+ #[tokio::test]
+ async fn build_agent_resume_config_clears_base_instructions() {
+     let (_session, mut turn) = make_session_and_context().await;
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index ff1b6d063..ec010c3c3 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -66,6 +66,18 @@ pub(crate) fn tool_user_shell_type(
+ }
+ 
+ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
++    if turn_context
++        .config
++        .features
++        .enabled(Feature::BossMainDecisionLayer)
++        && !turn_context.session_source.is_non_root_agent()
++    {
++        // Boss Main may still use source and connector tools, but a root
++        // decision-layer turn must not reach code mode as an escape hatch for
++        // local engineering execution. Workers keep the configured mode.
++        return ToolMode::Direct;
++    }
++
+     model_info.tool_mode.unwrap_or_else(|| {
+         if turn_context.config.features.enabled(Feature::CodeModeOnly) {
+             ToolMode::CodeModeOnly
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 908bb143a..e75c62c12 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -1024,12 +1024,23 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+         return;
+     }
+ 
++    // Shell remains available to the root Boss for read-only repository and
++    // connected-source retrieval. The root session's runtime permission
++    // profile blocks local writes; Workers keep their configured profile.
+     add_shell_tools(context, registry);
+     add_mcp_resource_tools(context, registry);
+     add_core_utility_tools(context, registry);
+     add_collaboration_tools(context, registry);
+ }
+ 
++fn boss_main_execution_isolation_active(turn_context: &TurnContext) -> bool {
++    turn_context
++        .config
++        .features
++        .enabled(Feature::BossMainDecisionLayer)
++        && !turn_context.session_source.is_non_root_agent()
++}
++
+ fn standalone_web_search_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+     namespace_tools_enabled(turn_context)
+         && turn_context.provider.capabilities().web_search
+@@ -1183,7 +1194,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+         );
+     }
+ 
+-    if environment_mode.has_environment() && features.enabled(Feature::RequestPermissionsTool) {
++    if environment_mode.has_environment()
++        && features.enabled(Feature::RequestPermissionsTool)
++        && !boss_main_execution_isolation_active(turn_context)
++    {
+         registry.add(RequestPermissionsHandler);
+     }
+ 
+@@ -1236,7 +1250,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+         ));
+     }
+ 
+-    if environment_mode.has_environment() && context.model_info.apply_patch_tool_type.is_some() {
++    if environment_mode.has_environment()
++        && context.model_info.apply_patch_tool_type.is_some()
++        && !boss_main_execution_isolation_active(turn_context)
++    {
+         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+         registry.add(ApplyPatchHandler::new(include_environment_id));
+     }
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index c77936fc9..13c78bc13 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -910,6 +910,66 @@ async fn shell_family_registers_only_unified_exec_tools() {
+     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
+ }
+ 
++#[tokio::test]
++async fn boss_main_decision_layer_hides_local_execution_but_workers_keep_it() {
++    let root = probe(|turn| {
++        set_features(
++            turn,
++            &[
++                Feature::BossMainDecisionLayer,
++                Feature::ShellTool,
++                Feature::UnifiedExec,
++                Feature::CodeMode,
++                Feature::RequestPermissionsTool,
++            ],
++        );
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++            Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
++                Some(ApplyPatchToolType::Freeform);
++        });
++    })
++    .await;
++
++    root.assert_registered_contains(&["exec_command", "write_stdin"]);
++    root.assert_visible_contains(&["exec_command", "write_stdin"]);
++    root.assert_registered_lacks(&["apply_patch", "request_permissions"]);
++    root.assert_visible_lacks(&["apply_patch", "request_permissions"]);
++    assert_eq!(root.tool_mode, ToolMode::Direct);
++
++    let worker = probe(|turn| {
++        set_features(
++            turn,
++            &[
++                Feature::BossMainDecisionLayer,
++                Feature::ShellTool,
++                Feature::UnifiedExec,
++                Feature::CodeMode,
++                Feature::RequestPermissionsTool,
++            ],
++        );
++        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++            parent_thread_id: ThreadId::new(),
++            depth: 1,
++            agent_path: Some(AgentPath::try_from("/root/worker").expect("valid agent path")),
++            agent_nickname: None,
++            agent_role: None,
++        });
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++            Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
++                Some(ApplyPatchToolType::Freeform);
++        });
++    })
++    .await;
++
++    worker.assert_registered_contains(&["exec_command", "write_stdin", "apply_patch"]);
++    worker.assert_visible_contains(&["exec_command", "write_stdin", "apply_patch"]);
++    worker.assert_registered_contains(&["request_permissions"]);
++    worker.assert_visible_contains(&["request_permissions"]);
++    assert_eq!(worker.tool_mode, ToolMode::CodeMode);
++}
++
+ #[tokio::test]
+ async fn exec_command_guidance_follows_executor_platform_and_fallbacks() {
+     let opposite_host_os = if cfg!(windows) { "linux" } else { "windows" };
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index fdeae5c6f..57ad52ebc 100644
+index fdeae5c6f..06334aca0 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
 @@ -153,6 +153,8 @@ pub enum Feature {
@@ -573,7 +1015,7 @@ index fdeae5c6f..57ad52ebc 100644
      /// Use the legacy Landlock Linux sandbox fallback instead of the default
      /// bubblewrap pipeline.
      UseLegacyLandlock,
-@@ -397,6 +399,22 @@ pub enum Feature {
+@@ -397,6 +399,25 @@ pub enum Feature {
      ResponsesWebsockets,
      /// Legacy rollout flag for Responses API WebSocket transport v2 experiments.
      ResponsesWebsocketsV2,
@@ -593,10 +1035,13 @@ index fdeae5c6f..57ad52ebc 100644
 +    /// profile's role is dropped without a warning, so the same profile behaves
 +    /// differently under a host that sends one and a CLI that does not.
 +    BossProfileRoleSurvivesHost,
++    /// Keep the root Boss agent in the decision layer by hiding local
++    /// engineering execution tools. Spawned workers are not affected.
++    BossMainDecisionLayer,
  }
  
  impl Feature {
-@@ -1051,6 +1069,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1051,6 +1072,12 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::UnderDevelopment,
          default_enabled: false,
      },
@@ -609,7 +1054,7 @@ index fdeae5c6f..57ad52ebc 100644
      FeatureSpec {
          id: Feature::SearchTool,
          key: "search_tool",
-@@ -1147,6 +1171,24 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1147,6 +1174,30 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -628,6 +1073,12 @@ index fdeae5c6f..57ad52ebc 100644
 +    FeatureSpec {
 +        id: Feature::BossProfileRoleSurvivesHost,
 +        key: "boss_profile_role_survives_host",
++        stage: Stage::UnderDevelopment,
++        default_enabled: false,
++    },
++    FeatureSpec {
++        id: Feature::BossMainDecisionLayer,
++        key: "boss_main_decision_layer",
 +        stage: Stage::UnderDevelopment,
 +        default_enabled: false,
 +    },
