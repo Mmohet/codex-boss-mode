@@ -24,12 +24,22 @@ moving substantial engineering execution into an isolated Worker context.
 
 ## Evidence boundary
 
-The runtime regression covers tool planning for root versus spawned Worker turns,
+The source regression covers tool planning for root versus spawned Worker turns,
 the root code-mode escape hatch, root read-only permission narrowing, Worker
-permission restoration, and nested hybrid-base replacement. Desktop and CLI
-profile assembly were smoke-checked after rebuilding the patched binary;
-external connector permissions are intentionally outside this local tool-surface
-regression.
+permission restoration, nested hybrid-base replacement, and permission-update
+snapshot refresh. The rebuilt live `0.153.4` binary's `--version`/`--help`
+output and profile/file/hash/state consistency were checked.
+
+The reproducible Luna smoke harness also observed: discussion A without tools;
+source-based judgment B with reads only; E refusing to close on “tests passed”;
+G refusing to treat “request review” as a workflow transition; C producing a
+runnable `report` and behavior checks in the Worker execution context; and K
+rejecting a root local write with `Operation not permitted` without creating
+the target file. The C parent trace still contains empty-receiver wait calls,
+so clean parent/Worker closure is not claimed. Fresh verifier execution,
+long-chain attention stability, and external connector permissions remain
+unverified. An assembled Desktop model request and full Desktop conversation
+were not directly observed in this run.
 
 `base.md` was not expanded for this change. `main.md`, the portable profile role,
 the live profile role, the runtime patch, and the worker adapter remain the
