@@ -34,13 +34,13 @@ result, checks actually run, observed outcomes, and unverified areas. Independen
 verification is added only when the change is risky or difficult to validate
 directly; small tasks do not enter a mandatory review pipeline.
 
-The full Boss profile also keeps the root Main in the decision layer: its shell
-remains available for read-only repository and connected-source retrieval, while
-patch, permission-escalation, and code-mode execution surfaces are removed from
-the root tool set. Spawned Workers retain the execution tools and their stock
-Codex base. This is a profile-scoped runtime boundary, not an operating-system
-security sandbox; external connectors and MCP tools continue to follow their own
-runtime permissions.
+The full Boss profile also keeps the root Main in the decision layer: local
+shell, MCP resources, MCP server tools, and dynamic client tools are removed
+from the Rust root tool set, while small utility and observation tools remain.
+Spawned Workers retain the execution and connector tools and their stock Codex
+base. This is a profile-scoped runtime boundary, not an operating-system
+security sandbox; tools injected by the Desktop host sit outside this Rust
+patch and must be checked separately.
 
 ## Two ways to install
 

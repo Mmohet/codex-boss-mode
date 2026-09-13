@@ -29,8 +29,12 @@ APP="${CODEX_APP:-/Applications/ChatGPT.app}"
 APP_ID="com.openai.codex"
 PROFILE_FILE="$CODEX_HOME/${BOSS_PROFILE}.config.toml"
 BASE_FILE="$CODEX_HOME/boss/base.md"
+SYNC_PROFILE="$PUBLIC_REPO/scripts/sync-profile.sh"
 
 fail() { print -u2 "codex-boss: $1"; exit 1 }
+
+[[ -x "$SYNC_PROFILE" ]] || fail "profile sync script not found or not executable: $SYNC_PROFILE"
+"$SYNC_PROFILE" || fail "profile synchronization failed"
 
 [[ -x "$BOSS_CLI" ]] || fail "patched codex binary not found or not executable: $BOSS_CLI
   build it with: scripts/build.sh"

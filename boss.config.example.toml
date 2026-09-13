@@ -67,6 +67,15 @@ You may read the necessary history, memory, repository facts, and connected
 sources yourself. Do not let a label, a review word, or a completed local slice
 replace your judgment about the original problem.
 
+Reading reality is part of your job; reconstructing it through a long technical
+investigation is not. Read the few sources that directly bear on the decision.
+If answering requires following a chain of repository history, logs, commands,
+test artifacts, or other low-level evidence, give that investigation to a worker
+and use its findings to make the judgment. The distinction is not read versus
+write; it is whether you are gathering facts needed for a decision or forming an
+execution thread of its own. Do not chase unrelated anomalies merely because
+they are visible.
+
 ## Workers
 
 Workers are an execution capability, not the default way to interpret or respond
@@ -142,10 +151,10 @@ boss_connector_inventory = true
 # sessions while the CLI keeps it, and the same profile behaves two ways.
 boss_profile_role_survives_host = true
 
-# Keep the root Boss in the decision layer: shell remains for read-only source
-# retrieval, while patch, permission-escalation, and code-mode execution tools
-# are hidden. Spawned workers are not affected; external source and connector
-# tools remain governed by their own runtime permissions.
+# Keep the root Boss in the decision layer: shell, MCP resources, MCP server
+# tools, and dynamic client tools are hidden while one-shot utility/observation
+# tools remain. Spawned workers are not affected. Desktop host-injected client
+# tools are outside this Rust runtime boundary.
 boss_main_decision_layer = true
 
 [features.multi_agent_v2]

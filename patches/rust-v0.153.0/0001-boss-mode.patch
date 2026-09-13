@@ -111,6 +111,43 @@ index 24d7988b0..cc9346161 100644
          "browser_use": {
            "type": "boolean"
          },
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index e5518b272..d06a54c93 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -823,6 +823,8 @@ impl AgentControl {
+ 
+         let parent_thread_id = *parent_thread_id;
+         let parent_thread = state.get_thread(parent_thread_id).await?;
++        let parent_turn = parent_thread.session.new_default_turn().await;
++        let boss_projection = crate::tools::boss_main_execution_isolation_active(&parent_turn);
+         let (subagent_developer_instructions, parent_developer_instructions) = match (
+             multi_agent_version,
+             config
+@@ -917,6 +919,11 @@ impl AgentControl {
+         // Compaction stores response items separately, so sanitize both top-level messages and
+         // compacted replacement histories with the same policy.
+         let retain_forked_item = |response_item: &mut ResponseItem, replaced: &mut bool| {
++            if boss_projection
++                && !crate::context_manager::boss_projection::durable_worker_item(response_item)
++            {
++                return false;
++            }
+             if matches!(response_item, ResponseItem::AgentMessage { .. }) {
+                 return false;
+             }
+@@ -974,7 +981,10 @@ impl AgentControl {
+             true
+         };
+         forked_rollout_items.retain_mut(|item| {
+-            if !keep_forked_rollout_item(item, preserve_reference_context_item)
++            let boss_conversation = boss_projection
++                && matches!(item, RolloutItem::ResponseItem(envelope)
++                    if crate::context_manager::boss_projection::durable_worker_item(&envelope.item));
++            if !(boss_conversation || keep_forked_rollout_item(item, preserve_reference_context_item))
+                 || destination_history_mode == Some(ThreadHistoryMode::Paginated)
+                     && matches!(
+                         &*item,
 diff --git a/codex-rs/core/src/apply_patch.rs b/codex-rs/core/src/apply_patch.rs
 index 1283d0cd9..fc4ea0f32 100644
 --- a/codex-rs/core/src/apply_patch.rs
@@ -472,6 +509,205 @@ index 249e4c80f..d5867763c 100644
  pub(crate) use compact_permissions::CompactPermissionsState;
  pub(crate) use context_window_guidance::ContextWindowGuidanceState;
  pub(crate) use environment::EnvironmentsState;
+diff --git a/codex-rs/core/src/context_manager/boss_projection.rs b/codex-rs/core/src/context_manager/boss_projection.rs
+new file mode 100644
+index 000000000..84c8e2a51
+--- /dev/null
++++ b/codex-rs/core/src/context_manager/boss_projection.rs
+@@ -0,0 +1,96 @@
++//! Request-only evidence aging. The stored conversation is never rewritten.
++use super::estimate_item_token_count;
++use codex_protocol::models::FunctionCallOutputBody;
++use codex_protocol::models::ResponseItem;
++use std::collections::HashSet;
++
++const RECENT_EVIDENCE_TOKENS: i64 = 4_000;
++
++/// Keep natural-language context when seeding a Boss worker, including commentary.
++pub(crate) fn durable_worker_item(item: &ResponseItem) -> bool {
++    matches!(
++        item,
++        ResponseItem::Message { .. } | ResponseItem::FunctionCallOutput { call_id: None, .. }
++    )
++}
++
++pub(crate) fn project(input: &mut [ResponseItem]) {
++    // Unknown tools stay verbatim. Classify tool identity, never output keywords.
++    let technical_calls: HashSet<String> = input
++        .iter()
++        .filter_map(|item| {
++            let (call_id, name, namespace) = match item {
++                ResponseItem::FunctionCall {
++                    call_id,
++                    name,
++                    namespace,
++                    ..
++                }
++                | ResponseItem::CustomToolCall {
++                    call_id,
++                    name,
++                    namespace,
++                    ..
++                } => (call_id, name.as_str(), namespace.as_deref()),
++                _ => return None,
++            };
++            (matches!(
++                name,
++                "exec_command"
++                    | "write_stdin"
++                    | "shell"
++                    | "shell_command"
++                    | "read_file"
++                    | "list_dir"
++                    | "grep_files"
++            ) || matches!(
++                (namespace, name),
++                (Some("functions"), "exec" | "wait")
++                    | (Some("web"), "run")
++                    | (Some("mcp__cua_repl"), "js")
++            ))
++            .then(|| call_id.clone())
++        })
++        .collect();
++
++    // Keep the entire newest response batch: parallel results must be seen once,
++    // even when that batch alone exceeds the rolling budget.
++    let fresh_start = input
++        .iter()
++        .rposition(|item| {
++            matches!(
++                item,
++                ResponseItem::FunctionCall { .. }
++                    | ResponseItem::CustomToolCall { .. }
++                    | ResponseItem::Reasoning { .. }
++            ) || matches!(item, ResponseItem::Message { role, .. } if role == "assistant")
++        })
++        .map_or(0, |index| index + 1);
++    let mut used = 0_i64;
++    for (index, item) in input.iter_mut().enumerate().rev() {
++        let tokens = estimate_item_token_count(item);
++        let (call_id, output) = match item {
++            ResponseItem::FunctionCallOutput {
++                call_id: Some(call_id),
++                output,
++                ..
++            }
++            | ResponseItem::CustomToolCallOutput {
++                call_id, output, ..
++            } if technical_calls.contains(call_id) => (call_id, output),
++            _ => continue,
++        };
++        used = used.saturating_add(tokens);
++        if index < fresh_start && used > RECENT_EVIDENCE_TOKENS {
++            output.body = FunctionCallOutputBody::Text(format!(
++                "[Earlier technical output omitted from active context. Call ID: {call_id}. \
++                 Original output remains in this thread's session log; reopen by call ID \
++                 or rerun the tool call above if needed.]"
++            ));
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "boss_projection_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/context_manager/boss_projection_tests.rs b/codex-rs/core/src/context_manager/boss_projection_tests.rs
+new file mode 100644
+index 000000000..d25b0cb81
+--- /dev/null
++++ b/codex-rs/core/src/context_manager/boss_projection_tests.rs
+@@ -0,0 +1,82 @@
++use super::*;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++#[test]
++fn boss_projection_ages_evidence_without_changing_conversation_or_fresh_batch() {
++    let call = |id: &str, name: &str| {
++        serde_json::from_value::<ResponseItem>(json!({
++            "type": "function_call", "call_id": id, "name": name, "arguments": "{}"
++        }))
++        .unwrap()
++    };
++    let output = |id: &str, text: &str| {
++        serde_json::from_value::<ResponseItem>(json!({
++            "type": "function_call_output", "call_id": id, "output": text
++        }))
++        .unwrap()
++    };
++    let message = |role: &str| {
++        serde_json::from_value::<ResponseItem>(json!({
++            "type": "message", "role": role,
++            "content": [{"type": "input_text", "text": "Keep this correction and judgment."}]
++        }))
++        .unwrap()
++    };
++    let original = vec![
++        message("user"),
++        call("old", "exec_command"),
++        output("old", &"x".repeat(20_000)),
++        message("assistant"),
++        call("handoff", "wait_agent"),
++        output("handoff", "Worker conclusion"),
++        call("unknown", "unknown_tool"),
++        output("unknown", "Unclassified evidence"),
++        call("recent", "exec_command"),
++        output("recent", "Recent evidence"),
++        message("assistant"),
++        call("new-a", "exec_command"),
++        call("new-b", "exec_command"),
++        output("new-a", "First parallel result"),
++        output("new-b", "Second parallel result"),
++    ];
++    let mut projected = original.clone();
++    project(&mut projected);
++    let ResponseItem::FunctionCallOutput {
++        call_id,
++        output: payload,
++        ..
++    } = &projected[2]
++    else {
++        panic!()
++    };
++    assert_eq!(call_id.as_deref(), Some("old"));
++    assert!(payload.text_content().unwrap().contains("Call ID: old"));
++    assert!(payload.text_content().unwrap().contains("session log"));
++    let mut expected = original.clone();
++    expected[2] = projected[2].clone();
++    assert_eq!(projected, expected);
++    assert_eq!(original[2], output("old", &"x".repeat(20_000)));
++
++    // A large fresh batch must still be observed in full before it can age out.
++    let mut large_batch = vec![
++        call("a", "exec_command"),
++        call("b", "exec_command"),
++        output("a", &"a".repeat(20_000)),
++        output("b", &"b".repeat(20_000)),
++        message("developer"), // Runtime context injection does not mark results as observed.
++    ];
++    let expected = large_batch.clone();
++    project(&mut large_batch);
++    assert_eq!(large_batch, expected);
++
++    let worker: Vec<_> = original
++        .iter()
++        .filter(|item| durable_worker_item(item))
++        .cloned()
++        .collect();
++    assert_eq!(
++        worker,
++        vec![message("user"), message("assistant"), message("assistant")]
++    );
++}
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index af520df6c..980fe9063 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -1,3 +1,4 @@
++pub(crate) mod boss_projection;
+ mod history;
+ mod normalize;
+ pub(crate) mod updates;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
 index 91300365b..5c9a411a6 100644
 --- a/codex-rs/core/src/session/mod.rs
@@ -781,7 +1017,7 @@ index 49502e8a6..58bbdd848 100644
              personality_enabled,
              // The models manager already owns its catalog.
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index b5931b330..be35f81e0 100644
+index b5931b330..2bdb25653 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -1674,6 +1674,120 @@ async fn get_base_instructions_no_user_content() {
@@ -905,6 +1141,77 @@ index b5931b330..be35f81e0 100644
  #[tokio::test]
  async fn reload_user_config_layer_updates_effective_apps_config() {
      let (session, _turn_context) = make_session_and_context().await;
+@@ -12238,6 +12352,8 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         turn_store: Arc::new(codex_extension_api::ExtensionData::new(tc.sub_id.clone())),
+         tool_runtime: test_tool_runtime(Arc::clone(&sess), Arc::clone(&tc)),
+         cancellation_token: CancellationToken::new(),
++        boss_main_observation_request:
++            crate::stream_events_utils::BossMainObservationRequest::new(0),
+     };
+ 
+     let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index f7c42680c..91454e76f 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -39,6 +39,7 @@ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+ use crate::skills::emit_explicit_skill_invocations;
++use crate::stream_events_utils::BossMainObservationRequest;
+ use crate::stream_events_utils::HandleOutputCtx;
+ use crate::stream_events_utils::InFlightFuture;
+ use crate::stream_events_utils::TurnItemContributorPolicy;
+@@ -1351,11 +1352,14 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+ 
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) fn build_prompt(
+-    input: Vec<ResponseItem>,
++    mut input: Vec<ResponseItem>,
+     step_context: &StepContext,
+     base_instructions: BaseInstructions,
+ ) -> Prompt {
+     let turn_context = &step_context.turn;
++    if crate::tools::boss_main_execution_isolation_active(turn_context) {
++        crate::context_manager::boss_projection::project(&mut input);
++    }
+     Prompt {
+         input,
+         tools: step_context.tool_router.model_visible_specs(),
+@@ -2270,6 +2274,11 @@ async fn try_run_sampling_request(
+         .instrument(trace_span!("stream_request"))
+         .or_cancel(&cancellation_token)
+         .await??;
++    let boss_main_observation_request = BossMainObservationRequest::new(
++        turn_context
++            .turn_metadata_state
++            .boss_main_observation_calls(),
++    );
+     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
+     let mut needs_follow_up = false;
+     let mut last_agent_message: Option<String> = None;
+@@ -2346,6 +2355,13 @@ async fn try_run_sampling_request(
+             ResponseEvent::Created => {}
+             ResponseEvent::OutputItemDone(mut item) => {
+                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
++                if last_assistant_message_from_item(&item, plan_mode).is_some()
++                    && crate::tools::boss_main_execution_isolation_active(&turn_context)
++                {
++                    turn_context
++                        .turn_metadata_state
++                        .note_boss_main_visible_rationale();
++                }
+                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
+                     let call_id = match &item {
+                         ResponseItem::FunctionCall { call_id, .. }
+@@ -2408,6 +2424,7 @@ async fn try_run_sampling_request(
+                     turn_store: Arc::clone(&turn_store),
+                     tool_runtime: tool_runtime.clone(),
+                     cancellation_token: cancellation_token.child_token(),
++                    boss_main_observation_request: boss_main_observation_request.clone(),
+                 };
+ 
+                 let preempt_for_mailbox_mail = match &item {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
 index e5a371e9d..305682972 100644
 --- a/codex-rs/core/src/session/turn_context.rs
@@ -987,6 +1294,192 @@ index 322dbbd56..ddad0d29f 100644
          let apps_usage_instructions_available =
              apps_available && turn_context.model_info().include_apps_usage_instructions;
          world_state.add_section(AppsInstructionsState::new(
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index a75dbe2af..af36f9c53 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -1,5 +1,7 @@
+ use std::pin::Pin;
+ use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ 
+ use codex_extension_api::ExtensionData;
+ use codex_history::ResponseItemEnvelope;
+@@ -27,6 +29,7 @@ use codex_protocol::models::MessagePhase;
+ use codex_protocol::models::ResponseInputItem;
+ use codex_protocol::models::ResponseItem;
+ use codex_rollout::state_db;
++use codex_tools::ToolName;
+ use codex_utils_stream_parser::strip_proposed_plan_blocks;
+ use futures::Future;
+ use tracing::debug;
+@@ -207,6 +210,77 @@ pub(crate) struct HandleOutputCtx {
+     pub turn_store: Arc<ExtensionData>,
+     pub tool_runtime: ToolCallRuntime,
+     pub cancellation_token: CancellationToken,
++    pub boss_main_observation_request: BossMainObservationRequest,
++}
++
++#[derive(Clone)]
++pub(crate) struct BossMainObservationRequest {
++    calls_at_request_start: u8,
++    admitted_call: Arc<AtomicBool>,
++}
++
++impl BossMainObservationRequest {
++    pub(crate) fn new(calls_at_request_start: u8) -> Self {
++        Self {
++            calls_at_request_start,
++            admitted_call: Arc::new(AtomicBool::new(false)),
++        }
++    }
++
++    fn admit(
++        &self,
++        turn_context: &TurnContext,
++    ) -> std::result::Result<(), &'static str> {
++        let state = &turn_context.turn_metadata_state;
++        match self.calls_at_request_start {
++            // The initial observation round may contain multiple parallel calls.
++            0 => {
++                if !self.admitted_call.swap(true, Ordering::AcqRel) {
++                    state.record_boss_main_observation_call();
++                }
++                Ok(())
++            }
++            // A second actual observation is a one-time continuation, gated by
++            // visible rationale in the conversation.
++            1 => {
++                if self.admitted_call.swap(true, Ordering::AcqRel) {
++                    return Err(BOSS_MAIN_OBSERVATION_EXHAUSTED_MESSAGE);
++                }
++                if state.take_boss_main_observation_rationale()
++                    && state.record_boss_main_observation_continuation()
++                {
++                    Ok(())
++                } else {
++                    self.admitted_call.store(false, Ordering::Release);
++                    Err(BOSS_MAIN_OBSERVATION_RATIONALE_MESSAGE)
++                }
++            }
++            _ => Err(BOSS_MAIN_OBSERVATION_EXHAUSTED_MESSAGE),
++        }
++    }
++}
++
++const BOSS_MAIN_OBSERVATION_RATIONALE_MESSAGE: &str =
++    "Direct observation is unavailable for this turn. First write a visible rationale explaining why one more observation is necessary, or delegate the investigation to a worker.";
++const BOSS_MAIN_OBSERVATION_EXHAUSTED_MESSAGE: &str =
++    "Direct observation is exhausted for this turn. Delegate any further investigation to a worker.";
++
++fn response_item_tool_name(item: &ResponseItem) -> Option<ToolName> {
++    match item {
++        ResponseItem::FunctionCall {
++            name, namespace, ..
++        }
++        | ResponseItem::CustomToolCall {
++            name, namespace, ..
++        } => Some(ToolName::new(namespace.clone(), name.clone()).with_default_namespace()),
++        ResponseItem::ToolSearchCall { .. } => Some(ToolName::plain("tool_search")),
++        ResponseItem::LocalShellCall { .. } => Some(ToolName::plain("exec_command")),
++        ResponseItem::WebSearchCall { .. } => Some(ToolName::namespaced("web", "run")),
++        ResponseItem::ImageGenerationCall { .. } => {
++            Some(ToolName::namespaced("image_gen", "imagegen"))
++        }
++        _ => None,
++    }
+ }
+ 
+ pub(crate) async fn apply_turn_item_contributors(
+@@ -295,7 +369,28 @@ pub(crate) async fn handle_output_item_done(
+     let mut output = OutputItemResult::default();
+     let plan_mode = ctx.turn_context.mode() == ModeKind::Plan;
+ 
+-    match ToolRouter::build_tool_call(item.clone()) {
++    if last_assistant_message_from_item(&item, plan_mode).is_some()
++        && crate::tools::boss_main_execution_isolation_active(&ctx.turn_context)
++    {
++        ctx.turn_context
++            .turn_metadata_state
++            .note_boss_main_visible_rationale();
++    }
++
++    let blocked_boss_observation = response_item_tool_name(&item)
++        .filter(|tool_name| {
++            crate::tools::boss_main_execution_isolation_active(&ctx.turn_context)
++                && !ctx.tool_runtime.is_worker_control_tool(tool_name)
++                && !crate::tools::spec_plan::is_boss_main_utility_tool(tool_name)
++        })
++        .and_then(|_| ctx.boss_main_observation_request.admit(&ctx.turn_context).err());
++
++    match blocked_boss_observation
++        .map(|message| {
++            Err(FunctionCallError::RespondToModel(message.to_string()))
++        })
++        .unwrap_or_else(|| ToolRouter::build_tool_call(item.clone()))
++    {
+         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
+         Ok(Some(call)) => {
+             ctx.sess
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 3ccaea092..177c63f1b 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -1,3 +1,4 @@
++use super::BossMainObservationRequest;
+ use super::HandleOutputCtx;
+ use super::TurnItemContributorPolicy;
+ use super::completed_item_defers_mailbox_delivery_to_next_turn;
+@@ -45,6 +46,40 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) ->
+     }
+ }
+ 
++#[tokio::test]
++async fn boss_main_observation_gate_requires_one_visible_rationale_continuation() {
++    let (_session, turn_context) = make_session_and_context().await;
++    let first_request = BossMainObservationRequest::new(0);
++    assert!(first_request.admit(&turn_context).is_ok());
++    assert!(first_request.admit(&turn_context).is_ok());
++    assert_eq!(turn_context.turn_metadata_state.boss_main_observation_calls(), 1);
++
++    let second_request = BossMainObservationRequest::new(1);
++    let blocked = second_request.admit(&turn_context).expect_err("rationale is required");
++    assert!(blocked.contains("visible rationale"));
++    let blocked_again = second_request
++        .admit(&turn_context)
++        .expect_err("the same observation stays blocked without rationale");
++    assert!(blocked_again.contains("visible rationale"));
++    assert_eq!(turn_context.turn_metadata_state.boss_main_observation_calls(), 1);
++
++    turn_context
++        .turn_metadata_state
++        .note_boss_main_visible_rationale();
++    assert!(second_request.admit(&turn_context).is_ok());
++    assert_eq!(turn_context.turn_metadata_state.boss_main_observation_calls(), 2);
++    let exhausted_same_request = second_request
++        .admit(&turn_context)
++        .expect_err("the continuation is one call only");
++    assert!(exhausted_same_request.contains("exhausted"));
++
++    let third_request = BossMainObservationRequest::new(2);
++    let exhausted = third_request
++        .admit(&turn_context)
++        .expect_err("further observation belongs to a worker");
++    assert!(exhausted.contains("exhausted"));
++}
++
+ #[test]
+ fn external_context_pollution_items_include_web_search_and_tool_search() {
+     let polluting_items = [
+@@ -306,6 +341,7 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
+         turn_store: Arc::new(ExtensionData::new(turn_context.sub_id.clone())),
+         tool_runtime,
+         cancellation_token: CancellationToken::new(),
++        boss_main_observation_request: BossMainObservationRequest::new(0),
+     };
+ 
+     let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
 diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
 index 4012d972f..c59752779 100644
 --- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
@@ -1160,6 +1653,38 @@ index 0979e8b1e..f3df63797 100644
  #[tokio::test]
  async fn build_agent_resume_config_clears_base_instructions() {
      let (_session, mut turn) = make_session_and_context().await;
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
+index b39408a37..bf532bf4d 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
+@@ -92,17 +92,18 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
+         options.exec_permission_approvals_enabled,
+     ));
+ 
++    let description = if include_windows_shell_guidance {
++        format!(
++            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
++            windows_shell_guidance()
++        )
++    } else {
++        "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
++            .to_string()
++    };
+     ToolSpec::Function(ResponsesApiTool {
+         name: "exec_command".to_string(),
+-        description: if include_windows_shell_guidance {
+-            format!(
+-                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
+-                windows_shell_guidance()
+-            )
+-        } else {
+-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+-                .to_string()
+-        },
++        description,
+         strict: false,
+         defer_loading: None,
+         parameters: JsonSchema::object(
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 index 8b97ff06b..e3a693cbb 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
@@ -1279,10 +1804,10 @@ index 657da4667..52b221f2d 100644
              UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
          let response = session
 diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
-index ff1b6d063..011508d36 100644
+index ff1b6d063..e98bb2768 100644
 --- a/codex-rs/core/src/tools/mod.rs
 +++ b/codex-rs/core/src/tools/mod.rs
-@@ -66,6 +66,18 @@ pub(crate) fn tool_user_shell_type(
+@@ -66,6 +66,19 @@ pub(crate) fn tool_user_shell_type(
  }
  
  pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
@@ -1292,16 +1817,17 @@ index ff1b6d063..011508d36 100644
 +        .enabled(Feature::BossMainDecisionLayer)
 +        && !turn_context.session_source.is_non_root_agent()
 +    {
-+        // Boss Main may still use source and connector tools, but a root
++        // Boss Main may still use higher-level observation tools, but a root
 +        // decision-layer turn must not reach code mode as an escape hatch for
-+        // local engineering execution. Workers keep the configured mode.
++        // local engineering execution. MCP/dynamic client tools stay with
++        // Workers, which keep the configured mode.
 +        return ToolMode::Direct;
 +    }
 +
      model_info.tool_mode.unwrap_or_else(|| {
          if turn_context.config.features.enabled(Feature::CodeModeOnly) {
              ToolMode::CodeModeOnly
-@@ -77,6 +89,19 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
+@@ -77,6 +90,19 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
      })
  }
  
@@ -1321,8 +1847,225 @@ index ff1b6d063..011508d36 100644
  pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
      let requested_tool_mode = requested_tool_mode(turn_context, model_info);
      if !turn_context.code_mode_available
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 7de566390..7053f61ea 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -70,6 +70,12 @@ impl ToolCallRuntime {
+             .create_diff_consumer(tool_name)
+     }
+ 
++    pub(crate) fn is_worker_control_tool(&self, tool_name: &codex_tools::ToolName) -> bool {
++        self.step_context
++            .tool_router
++            .is_worker_control_tool(tool_name)
++    }
++
+     #[instrument(level = "trace", skip_all)]
+     pub(crate) fn handle_tool_call(
+         self,
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index e73711f8e..50ee65d37 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -45,6 +45,13 @@ use serde_json::Value;
+ 
+ pub(crate) type ToolTelemetryTags = Vec<(&'static str, String)>;
+ 
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum BossMainToolCapability {
++    Utility,
++    Observer,
++    WorkerOnly,
++}
++
+ pub use codex_tools::ToolExecutor;
+ pub use codex_tools::ToolExposure;
+ 
+@@ -281,6 +288,7 @@ pub(crate) struct PostToolUsePayload {
+ pub(crate) struct RegisteredTool {
+     pub(crate) runtime: Arc<dyn CoreToolRuntime>,
+     pub(crate) exposure: ToolExposure,
++    pub(crate) boss_main_capability: BossMainToolCapability,
+ }
+ 
+ #[derive(Default)]
+@@ -315,6 +323,21 @@ impl ToolRegistry {
+         self.register_trusted_with_exposure(Arc::new(handler), exposure);
+     }
+ 
++    pub(crate) fn add_with_boss_capability<T>(
++        &mut self,
++        handler: T,
++        exposure: ToolExposure,
++        capability: BossMainToolCapability,
++    ) where
++        T: CoreToolRuntime + 'static,
++    {
++        self.register_trusted_with_exposure_and_boss_capability(
++            Arc::new(handler),
++            exposure,
++            capability,
++        );
++    }
++
+     pub(crate) fn register_trusted(&mut self, runtime: Arc<dyn CoreToolRuntime>) {
+         let exposure = runtime.exposure();
+         self.register_trusted_with_exposure(runtime, exposure);
+@@ -324,11 +347,28 @@ impl ToolRegistry {
+         &mut self,
+         runtime: Arc<dyn CoreToolRuntime>,
+         exposure: ToolExposure,
++    ) {
++        self.register_trusted_with_exposure_and_boss_capability(
++            runtime,
++            exposure,
++            BossMainToolCapability::WorkerOnly,
++        );
++    }
++
++    pub(crate) fn register_trusted_with_exposure_and_boss_capability(
++        &mut self,
++        runtime: Arc<dyn CoreToolRuntime>,
++        exposure: ToolExposure,
++        boss_main_capability: BossMainToolCapability,
+     ) {
+         let tool_name = runtime.tool_name().with_default_namespace();
+         match self.tools.entry(tool_name) {
+             Entry::Vacant(entry) => {
+-                entry.insert(RegisteredTool { runtime, exposure });
++                entry.insert(RegisteredTool {
++                    runtime,
++                    exposure,
++                    boss_main_capability,
++                });
+             }
+             Entry::Occupied(entry) => {
+                 let tool_name = entry.key();
+@@ -346,7 +386,15 @@ impl ToolRegistry {
+ 
+         let exposure = runtime.exposure();
+         self.tools
+-            .shift_insert(0, tool_name, RegisteredTool { runtime, exposure });
++            .shift_insert(
++                0,
++                tool_name,
++                RegisteredTool {
++                    runtime,
++                    exposure,
++                    boss_main_capability: BossMainToolCapability::WorkerOnly,
++                },
++            );
+     }
+ 
+     pub(crate) fn register_external(&mut self, runtime: Arc<dyn CoreToolRuntime>) -> bool {
+@@ -358,6 +406,19 @@ impl ToolRegistry {
+         &mut self,
+         runtime: Arc<dyn CoreToolRuntime>,
+         exposure: ToolExposure,
++    ) -> bool {
++        self.register_external_with_exposure_and_boss_capability(
++            runtime,
++            exposure,
++            BossMainToolCapability::WorkerOnly,
++        )
++    }
++
++    pub(crate) fn register_external_with_exposure_and_boss_capability(
++        &mut self,
++        runtime: Arc<dyn CoreToolRuntime>,
++        exposure: ToolExposure,
++        boss_main_capability: BossMainToolCapability,
+     ) -> bool {
+         let tool_name = runtime.tool_name().with_default_namespace();
+         if tool_name.is_default_namespace()
+@@ -372,7 +433,11 @@ impl ToolRegistry {
+ 
+         match self.tools.entry(tool_name) {
+             Entry::Vacant(entry) => {
+-                entry.insert(RegisteredTool { runtime, exposure });
++                entry.insert(RegisteredTool {
++                    runtime,
++                    exposure,
++                    boss_main_capability,
++                });
+                 true
+             }
+             Entry::Occupied(entry) => {
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 8d5bde308..912150d41 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -77,6 +77,7 @@ pub struct ToolRouter {
+     tool_mode: ToolMode,
+     code_mode_tool_names: BTreeMap<String, ToolName>,
+     tool_namespaces_info: Option<TurnToolNamespacesInfo>,
++    worker_control_tool_names: Arc<[ToolName]>,
+     can_manage_children: bool,
+ }
+ 
+@@ -119,12 +120,26 @@ impl ToolRouter {
+         tool_namespaces_info: Option<TurnToolNamespacesInfo>,
+         child_management_tools: &[ToolName],
+     ) -> Self {
++        let mut worker_control_tool_names = child_management_tools
++            .iter()
++            .map(|name| name.clone().with_default_namespace())
++            .collect::<Vec<_>>();
++        if let Some(namespace) = worker_control_tool_names
++            .first()
++            .map(|name| name.namespace.clone())
++        {
++            let spawn_agent = ToolName::new(namespace, "spawn_agent").with_default_namespace();
++            if !worker_control_tool_names.contains(&spawn_agent) {
++                worker_control_tool_names.push(spawn_agent);
++            }
++        }
+         let mut router = Self {
+             registry,
+             model_visible_specs: model_visible_specs.into(),
+             tool_mode,
+             code_mode_tool_names,
+             tool_namespaces_info,
++            worker_control_tool_names: worker_control_tool_names.into(),
+             can_manage_children: false,
+         };
+         router.can_manage_children = !child_management_tools.is_empty()
+@@ -174,6 +189,12 @@ impl ToolRouter {
+         self.can_manage_children
+     }
+ 
++    pub(crate) fn is_worker_control_tool(&self, name: &ToolName) -> bool {
++        self.worker_control_tool_names
++            .iter()
++            .any(|control| control == &name.clone().with_default_namespace())
++    }
++
+     // Answers if the tool plan lets the model invoke the tool directly, through code mode, or deferred tool search.
+     fn exposes_tool(&self, name: &ToolName) -> bool {
+         let name = name.clone().with_default_namespace();
+diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
+index 1d6b1d322..1410e172c 100644
+--- a/codex-rs/core/src/tools/router_tests.rs
++++ b/codex-rs/core/src/tools/router_tests.rs
+@@ -7,6 +7,7 @@ use crate::session::tests::make_session_and_context;
+ use crate::tools::context::ToolPayload;
+ use crate::tools::handlers::McpHandler;
+ use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::BossMainToolCapability;
+ use crate::tools::registry::RegisteredTool;
+ use crate::tools::registry::ToolExposure;
+ use crate::tools::spec_plan::append_source_tools;
+@@ -524,6 +525,7 @@ fn mcp_runtime(tool_info: codex_mcp::ToolInfo) -> RegisteredTool {
+     RegisteredTool {
+         exposure: runtime.exposure(),
+         runtime,
++        boss_main_capability: BossMainToolCapability::WorkerOnly,
+     }
+ }
+ 
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 908bb143a..b8145479a 100644
+index 908bb143a..b1b23488e 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -4,6 +4,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -1333,17 +2076,217 @@ index 908bb143a..b8145479a 100644
  use crate::tools::code_mode::execute_spec::create_code_mode_tool;
  use crate::tools::context::ToolInvocation;
  use crate::tools::effective_tool_mode;
-@@ -1024,6 +1025,9 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+@@ -53,6 +54,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
+ use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
+ use crate::tools::hosted_spec::WebSearchToolOptions;
+ use crate::tools::hosted_spec::create_web_search_tool;
++use crate::tools::registry::BossMainToolCapability;
+ use crate::tools::registry::CoreToolRuntime;
+ #[cfg(test)]
+ use crate::tools::registry::RegisteredTool;
+@@ -176,7 +178,12 @@ pub(crate) fn build_tool_router(
+             extension_tool_executors(session, step_store),
+             &mut registry,
+         );
+-        append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
++        // Boss Main has no provenance-safe way to distinguish connector-backed
++        // client tools from other dynamic tools; hide the whole client surface.
++        // Workers keep the complete dynamic tool set.
++        if !boss_main_execution_isolation_active(turn_context) {
++            append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
++        }
+         hosted_model_tool_specs(
+             turn_context,
+             model_info,
+@@ -311,8 +318,10 @@ pub(crate) fn append_source_tools(
+         return Vec::new();
+     }
+ 
+-    for tool in mcp_tools {
+-        registry.register_external_with_exposure(tool.runtime, tool.exposure);
++    if !boss_main_execution_isolation_active(turn_context) {
++        for tool in mcp_tools {
++            registry.register_external_with_exposure(tool.runtime, tool.exposure);
++        }
+     }
+     let standalone_web_search_tool = append_extension_tool_executors(
+         turn_context,
+@@ -320,7 +329,11 @@ pub(crate) fn append_source_tools(
+         extension_tool_executors,
+         registry,
+     );
+-    append_dynamic_tool_runtimes(dynamic_tools, registry);
++    // See the corresponding root filter in build_tool_router: dynamic tools
++    // have no source metadata, so root Boss hides the whole client surface.
++    if !boss_main_execution_isolation_active(turn_context) {
++        append_dynamic_tool_runtimes(dynamic_tools, registry);
++    }
+     hosted_model_tool_specs(
+         turn_context,
+         model_info,
+@@ -355,6 +368,7 @@ pub(crate) fn finalize_tool_router(
+     hosted_specs: Vec<ToolSpec>,
+     tool_search_handler_cache: &ToolSearchHandlerCache,
+ ) -> CodexResult<ToolRouter> {
++    remove_boss_main_mcp_tools(turn_context, &mut registry);
+     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+     let tool_mode = effective_tool_mode(turn_context, model_info);
+     let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
+@@ -369,7 +383,8 @@ pub(crate) fn finalize_tool_router(
+         }
+     }
+     let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
+-    if search_tool_enabled(turn_context, model_info)
++    if !boss_main_execution_isolation_active(turn_context)
++        && search_tool_enabled(turn_context, model_info)
+         && registry.entries().any(|tool| {
+             tool.runtime.tool_name() != tool_search_name
+                 && tool.exposure.is_deferred()
+@@ -526,6 +541,21 @@ fn apply_direct_model_only_namespace_overrides(
+     }
+ }
+ 
++fn remove_boss_main_mcp_tools(turn_context: &TurnContext, registry: &mut ToolRegistry) {
++    if !boss_main_execution_isolation_active(turn_context) {
++        return;
++    }
++
++    let mcp_tool_names = registry
++        .entries()
++        .filter(|tool| tool.runtime.mcp_server_name().is_some())
++        .map(|tool| tool.runtime.tool_name())
++        .collect::<Vec<_>>();
++    for tool_name in mcp_tool_names {
++        registry.remove(&tool_name);
++    }
++}
++
+ #[instrument(level = "trace", skip_all)]
+ fn build_model_visible_specs(
+     turn_context: &TurnContext,
+@@ -534,14 +564,39 @@ fn build_model_visible_specs(
+     code_mode_tool_names: &BTreeMap<String, ToolName>,
+     hosted_specs: Vec<ToolSpec>,
+ ) -> Vec<ToolSpec> {
++    let observation_calls = turn_context
++        .turn_metadata_state
++        .boss_main_observation_calls();
++    let observation_budget_exhausted = observation_calls >= 2;
++    let worker_control_tool_names = worker_control_tool_names(turn_context, model_info);
+     let mut specs = Vec::new();
++    let root_boss = boss_main_execution_isolation_active(turn_context);
+     for tool in registry.entries() {
+         let exposure = tool.exposure;
+-        if !exposure.is_direct() {
++        let tool_name = tool.runtime.tool_name();
++        let normalized_tool_name = tool_name.clone().with_default_namespace();
++        if root_boss && observation_budget_exhausted {
++            if !worker_control_tool_names
++                .iter()
++                .any(|control| control == &normalized_tool_name)
++                && tool.boss_main_capability != BossMainToolCapability::Utility
++            {
++                continue;
++            }
++        } else if root_boss
++            && tool.boss_main_capability == BossMainToolCapability::WorkerOnly
++            && !worker_control_tool_names.contains(&normalized_tool_name)
++        {
++            continue;
++        } else if !exposure.is_direct() {
+             continue;
+         }
+ 
+-        let tool_name = tool.runtime.tool_name();
++        let exposure = if root_boss && observation_budget_exhausted {
++            ToolExposure::DirectModelOnly
++        } else {
++            exposure
++        };
+         if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure) {
+             continue;
+         }
+@@ -556,7 +611,17 @@ fn build_model_visible_specs(
+             spec,
+         ));
+     }
+-    specs.extend(hosted_specs);
++    if root_boss {
++        if !observation_budget_exhausted {
++            specs.extend(
++                hosted_specs
++                    .into_iter()
++                    .filter(|spec| matches!(spec, ToolSpec::WebSearch { .. })),
++            );
++        }
++    } else {
++        specs.extend(hosted_specs);
++    }
+ 
+     merge_into_namespaces(specs)
+         .into_iter()
+@@ -566,6 +631,45 @@ fn build_model_visible_specs(
+         .collect()
+ }
+ 
++pub(crate) fn is_boss_main_utility_tool(tool_name: &ToolName) -> bool {
++    if tool_name.namespace.as_deref() == Some("clock") {
++        return matches!(tool_name.name.as_str(), "curr_time" | "sleep");
++    }
++
++    tool_name.is_default_namespace()
++        && matches!(
++            tool_name.name.as_str(),
++            "update_plan"
++                | "wait_for_environment"
++                | "request_user_input"
++                | "request_user_input_async"
++                | "new_context_window"
++                | "get_context_remaining"
++                | "list_available_plugins_to_install"
++                | "request_plugin_install"
++                | "test_sync_tool"
++                | "view_image"
++                | "get_goal"
++                | "create_goal"
++                | "update_goal"
++        )
++}
++
++fn worker_control_tool_names(turn_context: &TurnContext, model_info: &ModelInfo) -> Vec<ToolName> {
++    let mut tools = required_child_management_tool_names(turn_context, model_info);
++    let Some(namespace) = tools.first().map(|name| name.namespace.clone()) else {
++        return tools;
++    };
++    let spawn_agent = ToolName::new(namespace, "spawn_agent").with_default_namespace();
++    if !tools
++        .iter()
++        .any(|name| name.clone().with_default_namespace() == spawn_agent)
++    {
++        tools.push(spawn_agent);
++    }
++    tools
++}
++
+ fn spec_for_model_request(
+     turn_context: &TurnContext,
+     model_info: &ModelInfo,
+@@ -1024,8 +1128,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
          return;
      }
  
-+    // Shell remains available to the root Boss for read-only repository and
-+    // connected-source retrieval. The root session's runtime permission
-+    // profile blocks local writes; Workers keep their configured profile.
-     add_shell_tools(context, registry);
-     add_mcp_resource_tools(context, registry);
+-    add_shell_tools(context, registry);
+-    add_mcp_resource_tools(context, registry);
++    // The root Boss observes reality through higher-level tools and delegates
++    // repository execution to Workers. Workers keep the normal shell surface.
++    if !boss_main_execution_isolation_active(context.turn_context) {
++        add_shell_tools(context, registry);
++        add_mcp_resource_tools(context, registry);
++    }
      add_core_utility_tools(context, registry);
-@@ -1083,7 +1087,8 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
+     add_collaboration_tools(context, registry);
+ }
+@@ -1083,7 +1191,8 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
      }
  
      let allow_login_shell = any_environment_allows_login_shell(context.environments);
@@ -1353,7 +2296,58 @@ index 908bb143a..b8145479a 100644
      let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
      let options = ExecCommandHandlerOptions {
          allow_login_shell,
-@@ -1183,7 +1188,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1134,11 +1243,15 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+     let environment_mode = tool_environment_mode(context.environments);
+ 
+     if turn_context.config.update_plan_enabled {
+-        registry.add(PlanHandler);
++        registry.add_with_boss_capability(
++            PlanHandler,
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
+     }
+ 
+     if features.enabled(Feature::DeferredExecutor) {
+-        registry.add(
++        registry.add_with_boss_capability(
+             context
+                 .wait_for_environment_tool_config
+                 .map(Arc::as_ref)
+@@ -1146,15 +1259,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+                     WaitForEnvironmentHandler::default,
+                     WaitForEnvironmentHandler::new,
+                 ),
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
+         );
+     }
+ 
+     if turn_context.config.experimental_request_user_input_enabled {
+-        registry.add_with_exposure(
++        registry.add_with_boss_capability(
+             RequestUserInputHandler {
+                 available_modes: request_user_input_available_modes(features),
+             },
+             ToolExposure::DirectModelOnly,
++            BossMainToolCapability::Utility,
+         );
+     }
+ 
+@@ -1171,7 +1287,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+                 )
+             })
+     {
+-        registry.add_with_exposure(
++        registry.add_with_boss_capability(
+             RequestUserInputAsyncHandler {
+                 description: context
+                     .model_messages
+@@ -1180,16 +1296,28 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+                     .and_then(|tool| tool.description.clone()),
+             },
+             ToolExposure::DirectModelOnly,
++            BossMainToolCapability::Utility,
          );
      }
  
@@ -1365,8 +2359,72 @@ index 908bb143a..b8145479a 100644
          registry.add(RequestPermissionsHandler);
      }
  
-@@ -1236,7 +1244,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
-         ));
+     if features.enabled(Feature::TokenBudget) {
+-        registry.add_with_exposure(NewContextWindowHandler, ToolExposure::DirectModelOnly);
+-        registry.add(GetContextRemainingHandler);
++        registry.add_with_boss_capability(
++            NewContextWindowHandler,
++            ToolExposure::DirectModelOnly,
++            BossMainToolCapability::Utility,
++        );
++        registry.add_with_boss_capability(
++            GetContextRemainingHandler,
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
+     }
+ 
+     let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);
+@@ -1199,7 +1327,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+         .iter()
+         .any(|tool| tool == "clock");
+     if current_time_reminder_enabled || model_has_clock {
+-        registry.add(CurrentTimeHandler);
++        registry.add_with_boss_capability(
++            CurrentTimeHandler,
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
+     }
+     if features.enabled(Feature::SleepTool)
+         && match turn_context.config.sleep_tool_mode {
+@@ -1217,7 +1349,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+             }
+         }
+     {
+-        registry.add(SleepHandler);
++        registry.add_with_boss_capability(
++            SleepHandler,
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
+     }
+ 
+     if tool_suggest_enabled(turn_context)
+@@ -1226,17 +1362,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+             .filter(|candidates| !candidates.tools.is_empty())
+     {
+         if candidates.presentation == crate::tools::router::ToolSuggestPresentation::ListTool {
+-            registry.add(ListAvailablePluginsToInstallHandler::new(
+-                collect_request_plugin_install_entries(&candidates.tools),
+-            ));
++            registry.add_with_boss_capability(
++                ListAvailablePluginsToInstallHandler::new(collect_request_plugin_install_entries(
++                    &candidates.tools,
++                )),
++                ToolExposure::Direct,
++                BossMainToolCapability::Utility,
++            );
+         }
+-        registry.add(RequestPluginInstallHandler::new(
+-            candidates.tools.clone(),
+-            candidates.presentation,
+-        ));
++        registry.add_with_boss_capability(
++            RequestPluginInstallHandler::new(candidates.tools.clone(), candidates.presentation),
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
      }
  
 -    if environment_mode.has_environment() && context.model_info.apply_patch_tool_type.is_some() {
@@ -1377,11 +2435,135 @@ index 908bb143a..b8145479a 100644
          let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
          registry.add(ApplyPatchHandler::new(include_environment_id));
      }
+@@ -1247,21 +1391,29 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+         .iter()
+         .any(|tool| tool == "test_sync_tool")
+     {
+-        registry.add(TestSyncHandler);
++        registry.add_with_boss_capability(
++            TestSyncHandler,
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
+     }
+ 
+     if environment_mode.has_environment() && features.enabled(Feature::ViewImage) {
+         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+-        registry.add(ViewImageHandler::new(ViewImageToolOptions {
+-            can_request_original_image_detail: can_request_original_image_detail(
+-                context.model_info,
+-            ),
+-            unified_image_budget: unified_image_budget_enabled(
+-                &turn_context.config.features,
+-                context.model_info,
+-            ),
+-            include_environment_id,
+-        }));
++        registry.add_with_boss_capability(
++            ViewImageHandler::new(ViewImageToolOptions {
++                can_request_original_image_detail: can_request_original_image_detail(
++                    context.model_info,
++                ),
++                unified_image_budget: unified_image_budget_enabled(
++                    &turn_context.config.features,
++                    context.model_info,
++                ),
++                include_environment_id,
++            }),
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
+     }
+ }
+ 
+@@ -1427,8 +1579,21 @@ fn append_extension_tool_executors(
+         {
+             continue;
+         }
++        let capability = if is_boss_main_utility_tool(&tool_name) {
++            BossMainToolCapability::Utility
++        } else if is_standalone_web_search {
++            BossMainToolCapability::Observer
++        } else {
++            BossMainToolCapability::WorkerOnly
++        };
++        let exposure = executor.exposure();
+         let runtime = Arc::new(ExtensionToolAdapter::new(executor));
+-        if registry.register_external(runtime) && is_standalone_web_search {
++        if registry.register_external_with_exposure_and_boss_capability(
++            runtime,
++            exposure,
++            capability,
++        ) && is_standalone_web_search
++        {
+             standalone_web_search_tool = Some(tool_name);
+         }
+     }
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index c77936fc9..13c78bc13 100644
+index c77936fc9..fa30162de 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
-@@ -910,6 +910,66 @@ async fn shell_family_registers_only_unified_exec_tools() {
+@@ -58,6 +58,7 @@ use crate::tools::handlers::ToolSearchHandlerCache;
+ use crate::tools::handlers::WaitForEnvironmentHandler;
+ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
+ use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::BossMainToolCapability;
+ use crate::tools::registry::RegisteredTool;
+ use crate::tools::router::ToolRouter;
+ use crate::tools::router::ToolSuggestCandidates;
+@@ -401,6 +402,43 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for DeferredExtensionTool {
+     }
+ }
+ 
++struct PlainExtensionTool {
++    name: &'static str,
++}
++
++impl<'call> ToolExecutor<ExtensionToolCall<'call>> for PlainExtensionTool {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain(self.name)
++    }
++
++    fn spec(&self) -> ToolSpec {
++        ToolSpec::Function(ResponsesApiTool {
++            name: self.name.to_string(),
++            description: "Test extension tool.".to_string(),
++            strict: false,
++            defer_loading: None,
++            parameters: codex_tools::JsonSchema::default(),
++            output_schema: None,
++        })
++    }
++
++    fn handle<'a>(&'a self, _call: ExtensionToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        'call: 'a,
++    {
++        Box::pin(async {
++            Ok(Box::new(codex_tools::JsonToolOutput::new(json!({}))) as Box<dyn ToolOutput>)
++        })
++    }
++}
++
++fn goal_tool_executors() -> Vec<Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>> {
++    ["get_goal", "create_goal", "update_goal"]
++        .into_iter()
++        .map(|name| Arc::new(PlainExtensionTool { name }) as Arc<_>)
++        .collect()
++}
++
+ fn duplicate_primary_environment(turn: &mut TurnContext) {
+     let mut second_environment = turn
+         .environments
+@@ -449,6 +487,7 @@ fn mcp_runtime(
+     RegisteredTool {
+         runtime: handler,
+         exposure,
++        boss_main_capability: BossMainToolCapability::WorkerOnly,
+     }
+ }
+ 
+@@ -910,6 +949,275 @@ async fn shell_family_registers_only_unified_exec_tools() {
      assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
  }
  
@@ -1406,10 +2588,11 @@ index c77936fc9..13c78bc13 100644
 +    })
 +    .await;
 +
-+    root.assert_registered_contains(&["exec_command", "write_stdin"]);
-+    root.assert_visible_contains(&["exec_command", "write_stdin"]);
++    root.assert_registered_lacks(&["exec_command", "write_stdin"]);
++    root.assert_visible_lacks(&["exec_command", "write_stdin"]);
 +    root.assert_registered_lacks(&["apply_patch", "request_permissions"]);
 +    root.assert_visible_lacks(&["apply_patch", "request_permissions"]);
++    assert!(!root.has_terminal_controls);
 +    assert_eq!(root.tool_mode, ToolMode::Direct);
 +
 +    let worker = probe(|turn| {
@@ -1442,12 +2625,341 @@ index c77936fc9..13c78bc13 100644
 +    worker.assert_visible_contains(&["exec_command", "write_stdin", "apply_patch"]);
 +    worker.assert_registered_contains(&["request_permissions"]);
 +    worker.assert_visible_contains(&["request_permissions"]);
++    let ToolSpec::Function(worker_exec) = worker.visible_spec("exec_command") else {
++        panic!("expected worker exec_command function spec");
++    };
++    assert!(!worker_exec.description.contains("root decision layer"));
 +    assert_eq!(worker.tool_mode, ToolMode::CodeMode);
++}
++
++#[tokio::test]
++async fn boss_main_hides_mcp_and_dynamic_external_tools_but_workers_keep_them() {
++    let inputs = || ToolPlanInputs {
++        tool_runtimes: vec![mcp_runtime(
++            "github",
++            "mcp__github",
++            "search_issues",
++            ToolExposure::Direct,
++        )],
++        dynamic_tools: vec![dynamic_tool(Some("clickup"), "list_tasks", false)],
++        ..ToolPlanInputs::default()
++    };
++
++    let root = probe_with(
++        |turn| {
++            set_features(
++                turn,
++                &[Feature::BossMainDecisionLayer, Feature::MultiAgentV2],
++            );
++            Arc::make_mut(&mut turn.config).update_plan_enabled = true;
++            set_feature(turn, Feature::ViewImage, /*enabled*/ true);
++        },
++        inputs(),
++    )
++    .await;
++    let mcp_tool_name = ToolName::namespaced("mcp__github", "search_issues").to_string();
++    let dynamic_tool_name = ToolName::namespaced("clickup", "list_tasks").to_string();
++    root.assert_registered_lacks(&[mcp_tool_name.as_str(), dynamic_tool_name.as_str()]);
++    root.assert_visible_lacks(&["mcp__github", "clickup"]);
++    root.assert_registered_contains(&["update_plan", "view_image"]);
++    root.assert_visible_contains(&["update_plan", "view_image"]);
++
++    let worker = probe_with(
++        |turn| {
++            set_features(
++                turn,
++                &[Feature::BossMainDecisionLayer, Feature::MultiAgentV2],
++            );
++            turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                parent_thread_id: ThreadId::new(),
++                depth: 1,
++                agent_path: Some(AgentPath::try_from("/root/worker").expect("valid agent path")),
++                agent_nickname: None,
++                agent_role: None,
++            });
++        },
++        inputs(),
++    )
++    .await;
++    worker.assert_registered_contains(&[mcp_tool_name.as_str(), dynamic_tool_name.as_str()]);
++    worker.assert_visible_contains(&["mcp__github", "clickup"]);
++}
++
++#[tokio::test]
++async fn boss_main_observation_budget_keeps_utilities_and_worker_controls() {
++    let (_session, mut turn) = make_session_and_context().await;
++    set_features(
++        &mut turn,
++        &[Feature::BossMainDecisionLayer, Feature::MultiAgentV2],
++    );
++    Arc::make_mut(&mut turn.config).update_plan_enabled = true;
++    set_feature(&mut turn, Feature::ViewImage, /*enabled*/ true);
++    let inputs = ToolPlanInputs {
++        extension_tool_executors: goal_tool_executors(),
++        dynamic_tools: vec![dynamic_tool(None, "inspect", /*defer_loading*/ false)],
++        ..ToolPlanInputs::default()
++    };
++
++    let before = plan_with_model(&turn, turn.model_info(), inputs);
++    let before = ToolPlanProbe::from_router(before);
++    before.assert_visible_lacks(&["inspect"]);
++    assert!(
++        before
++            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
++            .contains(&"spawn_agent".to_string())
++    );
++
++    turn.turn_metadata_state
++        .record_boss_main_observation_call();
++    let after = ToolPlanProbe::from_router(plan_with_model(
++        &turn,
++        turn.model_info(),
++        ToolPlanInputs {
++            extension_tool_executors: goal_tool_executors(),
++            dynamic_tools: vec![dynamic_tool(None, "inspect", /*defer_loading*/ false)],
++            ..ToolPlanInputs::default()
++        },
++    ));
++    after.assert_visible_lacks(&["inspect"]);
++    after.assert_visible_contains(&[
++        "update_plan",
++        "view_image",
++        "get_goal",
++        "create_goal",
++        "update_goal",
++    ]);
++    let mut controls = after
++        .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
++        .to_vec();
++    controls.sort();
++    assert_eq!(
++        controls,
++        [
++            "followup_task",
++            "interrupt_agent",
++            "list_agents",
++            "send_message",
++            "spawn_agent",
++            "wait_agent",
++        ]
++        .map(str::to_string)
++    );
++
++    let after_second_utility_call = ToolPlanProbe::from_router(plan_with_model(
++        &turn,
++        turn.model_info(),
++        ToolPlanInputs {
++            extension_tool_executors: goal_tool_executors(),
++            dynamic_tools: vec![dynamic_tool(None, "inspect", /*defer_loading*/ false)],
++            ..ToolPlanInputs::default()
++        },
++    ));
++    after_second_utility_call.assert_visible_lacks(&["inspect"]);
++    after_second_utility_call.assert_visible_contains(&[
++        "update_plan",
++        "view_image",
++        "get_goal",
++        "create_goal",
++        "update_goal",
++    ]);
++
++    turn.turn_metadata_state
++        .note_boss_main_visible_rationale();
++    assert!(turn
++        .turn_metadata_state
++        .take_boss_main_observation_rationale());
++    assert!(turn
++        .turn_metadata_state
++        .record_boss_main_observation_continuation());
++    let exhausted = ToolPlanProbe::from_router(plan_with_model(
++        &turn,
++        turn.model_info(),
++        ToolPlanInputs {
++            extension_tool_executors: goal_tool_executors(),
++            dynamic_tools: vec![dynamic_tool(None, "inspect", /*defer_loading*/ false)],
++            ..ToolPlanInputs::default()
++        },
++    ));
++    exhausted.assert_visible_lacks(&["inspect"]);
++    exhausted.assert_visible_contains(&[
++        "update_plan",
++        "view_image",
++        "get_goal",
++        "create_goal",
++        "update_goal",
++    ]);
++}
++
++#[tokio::test]
++async fn boss_main_observation_round_restores_deferred_v1_worker_controls() {
++    let (_session, mut turn) = make_session_and_context().await;
++    set_features(
++        &mut turn,
++        &[Feature::BossMainDecisionLayer, Feature::Collab],
++    );
++    set_feature(&mut turn, Feature::MultiAgentV2, /*enabled*/ false);
++    update_turn_settings_for_test(&mut turn, |settings| {
++        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
++    });
++
++    turn.turn_metadata_state
++        .record_boss_main_observation_call();
++    turn.turn_metadata_state
++        .note_boss_main_visible_rationale();
++    assert!(turn
++        .turn_metadata_state
++        .take_boss_main_observation_rationale());
++    assert!(turn
++        .turn_metadata_state
++        .record_boss_main_observation_continuation());
++    let after = ToolPlanProbe::from_router(plan_with_model(
++        &turn,
++        turn.model_info(),
++        ToolPlanInputs::default(),
++    ));
++
++    let mut controls = after
++        .namespace_function_names(MULTI_AGENT_V1_NAMESPACE)
++        .to_vec();
++    controls.sort();
++    assert_eq!(
++        controls,
++        [
++            "close_agent",
++            "resume_agent",
++            "send_input",
++            "spawn_agent",
++            "wait_agent",
++        ]
++        .map(str::to_string)
++    );
++    after.assert_visible_lacks(&["tool_search"]);
 +}
 +
  #[tokio::test]
  async fn exec_command_guidance_follows_executor_platform_and_fallbacks() {
      let opposite_host_os = if cfg!(windows) { "linux" } else { "windows" };
+@@ -1685,6 +1993,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
+             RegisteredTool {
+                 runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
+                 exposure,
++                boss_main_capability: BossMainToolCapability::WorkerOnly,
+             }
+         })
+         .collect();
+@@ -1981,6 +2290,7 @@ async fn strict_tool_collisions_allow_multiple_tools_in_one_namespace() {
+                         McpHandler::new(undocumented_tool).expect("MCP tool spec should build"),
+                     ),
+                     exposure: ToolExposure::Direct,
++                    boss_main_capability: BossMainToolCapability::WorkerOnly,
+                 },
+                 mcp_runtime("shared", "shared", "lookup", ToolExposure::Direct),
+                 mcp_runtime("shared", "shared", "list", ToolExposure::Direct),
+@@ -2020,6 +2330,7 @@ async fn relaxed_tool_collisions_preserve_first_nonempty_namespace_description()
+             RegisteredTool {
+                 runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
+                 exposure: ToolExposure::Direct,
++                boss_main_capability: BossMainToolCapability::WorkerOnly,
+             }
+         };
+         let plan = probe_with(
+diff --git a/codex-rs/core/src/turn_metadata.rs b/codex-rs/core/src/turn_metadata.rs
+index 56d962c1f..db11fdce1 100644
+--- a/codex-rs/core/src/turn_metadata.rs
++++ b/codex-rs/core/src/turn_metadata.rs
+@@ -7,6 +7,7 @@ use std::sync::Mutex;
+ use std::sync::OnceLock;
+ use std::sync::RwLock;
+ use std::sync::atomic::AtomicBool;
++use std::sync::atomic::AtomicU8;
+ use std::sync::atomic::Ordering;
+ 
+ use serde_json::Value;
+@@ -136,6 +137,12 @@ pub(crate) struct TurnMetadataState {
+     responses_api_metadata: RwLock<BTreeMap<String, String>>,
+     responsesapi_client_metadata: RwLock<BTreeMap<String, String>>,
+     user_input_requested_during_turn: AtomicBool,
++    // Root Boss-only observation budget; each TurnMetadataState belongs to one
++    // top-level turn. The first observation round may contain parallel calls;
++    // one later call is available only after a visible rationale.
++    boss_main_observation_calls: AtomicU8,
++    boss_main_observation_rationale: AtomicBool,
++    boss_main_observation_continuation_used: AtomicBool,
+     enrichment_task: Mutex<Option<AbortOnDropHandle<()>>>,
+     git_enrichment_complete: watch::Sender<bool>,
+ }
+@@ -222,6 +229,9 @@ impl TurnMetadataState {
+             responses_api_metadata: RwLock::new(BTreeMap::new()),
+             responsesapi_client_metadata: RwLock::new(BTreeMap::new()),
+             user_input_requested_during_turn: AtomicBool::new(false),
++            boss_main_observation_calls: AtomicU8::new(0),
++            boss_main_observation_rationale: AtomicBool::new(false),
++            boss_main_observation_continuation_used: AtomicBool::new(false),
+             enrichment_task: Mutex::new(None),
+             git_enrichment_complete: watch::channel(/*init*/ true).0,
+         }
+@@ -290,6 +300,61 @@ impl TurnMetadataState {
+             .store(true, Ordering::Relaxed);
+     }
+ 
++    pub(crate) fn boss_main_observation_calls(&self) -> u8 {
++        self.boss_main_observation_calls.load(Ordering::Acquire)
++    }
++
++    pub(crate) fn record_boss_main_observation_call(&self) {
++        let _ = self.boss_main_observation_calls.compare_exchange(
++            0,
++            1,
++            Ordering::AcqRel,
++            Ordering::Acquire,
++        );
++    }
++
++    pub(crate) fn record_boss_main_observation_continuation(&self) -> bool {
++        self.boss_main_observation_calls.compare_exchange(
++            1,
++            2,
++            Ordering::AcqRel,
++            Ordering::Acquire,
++        )
++        .is_ok()
++    }
++
++    pub(crate) fn note_boss_main_visible_rationale(&self) {
++        if self.boss_main_observation_calls() == 1
++            && !self
++                .boss_main_observation_continuation_used
++                .load(Ordering::Acquire)
++        {
++            self.boss_main_observation_rationale
++                .store(true, Ordering::Release);
++        }
++    }
++
++    pub(crate) fn take_boss_main_observation_rationale(&self) -> bool {
++        if self
++            .boss_main_observation_continuation_used
++            .load(Ordering::Acquire)
++        {
++            return false;
++        }
++
++        if self
++            .boss_main_observation_rationale
++            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
++            .is_ok()
++        {
++            self.boss_main_observation_continuation_used
++                .store(true, Ordering::Release);
++            true
++        } else {
++            false
++        }
++    }
++
+     pub(crate) fn set_tool_namespaces_info(&self, tool_namespaces_info: TurnToolNamespacesInfo) {
+         *self
+             .tool_namespaces_info
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
 index fdeae5c6f..06334aca0 100644
 --- a/codex-rs/features/src/lib.rs
