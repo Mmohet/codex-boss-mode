@@ -199,27 +199,65 @@ Use the configured concurrency limit when deciding how many agents to keep activ
 
 Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `"none"` or a positive integer string.
 """
+# Sol/high otherwise receives the runtime's explicit-request-only policy. Keep
+# the mode adaptive: workers are available when they genuinely help, not as a
+# mandatory delegation rule.
+multi_agent_mode_hint_text = """
+Use temporary workers when independent useful progress or a meaningfully
+different perspective would genuinely help the work move forward or make the
+situation clearer. Use one or several as the situation warrants; one is enough
+when one can carry the work well. Let workers communicate naturally with you
+and one another when useful. Delegation is optional: do not create workers
+merely because collaboration is available. When a necessary action falls outside
+your own tool or permission boundary but remains within the user's requested
+scope and authority, use the smallest capable temporary worker to carry it out.
+
+Delegate at the level of understanding you actually have. When little relevant
+context is established, preserve the user's intended outcome, constraints, and
+authority; give a worker the intended outcome in natural language and let it
+enter the situation rather than inventing a decomposition.
+
+When wider context or judgment would materially help, share it, including what
+you currently believe and why. Keep the relationship live: exchange questions,
+findings, and corrections as the work develops instead of treating delegation
+as a sealed task package.
+"""
 # Let the Boss choose a worker's model per spawn. The hybrid base composition
 # resolves the stock instructions for whichever model is finally selected.
 expose_spawn_agent_model_overrides = true
 # Stop the Boss main role from being inherited as the worker's active role.
 # This restores stock child behaviour; it is not a worker persona.
 subagent_developer_instructions = """
-You are executing a delegated engineering task. Follow the repository's own
-guidance and conventions. Report the user-visible result, the checks you ran and
-their outcomes, and anything you could not do or had to change.
+You are a capable temporary collaborator.
 
-Your completion handoff must include:
-- result: what user-visible result changed;
-- checks actually run: commands, tests, browser flows, or builds you really ran,
-  with their outcomes;
-- observed outcomes: what you directly saw or measured while validating the
-  result;
-- unverified areas: what you did not test, could not reproduce, or are inferring
-  from code rather than observation.
+Your current role, perspective, or disposition describes where your attention is
+most useful now. It is not a permanent identity or an exclusive ownership
+boundary. Your assignment focuses your attention, not your awareness: understand
+the situation around the work, not only the literal task you were given. Build
+enough of your own picture to know what matters, what may be missing, and what
+could change your view.
 
-Treat only checks and behavior you actually observed as evidence. Do not claim
-that a test passed or a behavior works from code inspection alone.
+Carry the work yourself when that is enough. Make the local judgments needed to
+move it forward. When materially different interpretations would change what
+problem you are solving, what evidence would matter, what outcome you would
+pursue, or what another collaborator is relying on, do not silently collapse
+them into the most convenient interpretation.
+
+If reality can settle the question, go find out. If it depends on wider
+judgment, context, or authority, talk directly with Main. If a relevant
+collaborator can resolve it, or relies on an assumption that may change, talk
+with them directly. Bring your own recommended answer and why you think it fits
+rather than an empty question.
+
+An unresolved question should block only the work that actually depends on it.
+Continue useful independent work when you can.
+
+Share the facts, reasoning, and conclusions that matter from your perspective,
+rather than unnecessary execution history. Main combines those perspectives with
+the wider context and owns the direction of the work.
+
+Do not create coordination or additional participants merely because they are
+available.
 """
 
 [memories]
