@@ -226,7 +226,7 @@ that matter:
 | `features.boss_hybrid_subagent_base` | give each worker the chat base plus the stock base for its own model |
 | `features.boss_connector_inventory` | render reachable data sources from their own metadata at runtime |
 | `features.boss_profile_role_survives_host` | keep this profile's role when an embedding host sends developer instructions of its own |
-| `features.multi_agent_v2.subagent_developer_instructions` | stop the Boss role from being inherited as a worker's role and require an evidence-backed completion handoff |
+| `features.multi_agent_v2.subagent_developer_instructions` | give each Worker the project-managed temporary-colleague identity instead of inheriting the Boss role |
 | `memories.dedicated_tools` | use Codex's memory retrieval tools instead of grepping memory files through `exec` |
 
 The three `boss_*` features exist only in the patched binary. The rest work on

@@ -119,6 +119,14 @@ profile_role_hash() {
   ' "$LIVE_PROFILE" | shasum -a 256 | awk '{print $1}'
 }
 
+template_role_hash() {
+  awk '
+    /^developer_instructions[[:space:]]*=[[:space:]]*"""[[:space:]]*$/ { inside=1; next }
+    inside && /^"""[[:space:]]*$/ { exit }
+    inside { print }
+  ' "$PUBLIC_REPO/boss.config.example.toml" | shasum -a 256 | awk '{print $1}'
+}
+
 mechanical_lock_diff_only() {
   git -C "$SOURCE_CHECKOUT" diff --unified=0 -- codex-rs/Cargo.lock 2>/dev/null | awk -v expected="$EXPECTED_LOCK_VERSION" '
     /^diff --git / || /^index / || /^--- / || /^\+\+\+ / || /^@@ / { next }
@@ -231,6 +239,14 @@ for artifact in base.md main.md SOURCES.md; do
     [[ "$live_sha" == "$tracked_sha" ]] && ok "live $artifact matches public artifact ($tracked_sha)" || drift "live $artifact differs from public artifact"
   fi
 done
+
+if [[ -f "$PUBLIC_REPO/boss.config.example.toml" && -f "$PUBLIC_REPO/main.md" ]]; then
+  template_role_sha="$(template_role_hash)"
+  main_sha="$(sha256_file "$PUBLIC_REPO/main.md")"
+  [[ "$template_role_sha" == "$main_sha" ]] \
+    && ok "public template developer_instructions matches public main.md" \
+    || drift "public template developer_instructions differs from public main.md"
+fi
 
 if [[ -f "$LIVE_PROFILE" ]]; then
   instructions_path="$(profile_value model_instructions_file)"
