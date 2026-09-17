@@ -1,5 +1,5 @@
 diff --git a/codex-rs/config/src/loader/mod.rs b/codex-rs/config/src/loader/mod.rs
-index 48ea0d3bc..031173da0 100644
+index 48ea0d3..031173d 100644
 --- a/codex-rs/config/src/loader/mod.rs
 +++ b/codex-rs/config/src/loader/mod.rs
 @@ -185,7 +185,7 @@ pub async fn load_config_layers_state(
@@ -12,7 +12,7 @@ index 48ea0d3bc..031173da0 100644
      let ignore_user_config = overrides.ignore_user_config;
      let ignore_project_config = overrides.ignore_project_config;
 diff --git a/codex-rs/config/src/state.rs b/codex-rs/config/src/state.rs
-index ea0283313..09dd17802 100644
+index ea02833..09dd178 100644
 --- a/codex-rs/config/src/state.rs
 +++ b/codex-rs/config/src/state.rs
 @@ -102,14 +102,48 @@ impl LoaderOverrides {
@@ -70,7 +70,7 @@ index ea0283313..09dd17802 100644
  
  #[derive(Debug, Clone, PartialEq)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 24d7988b0..cc9346161 100644
+index 2d5d268..031baa1 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -642,6 +642,18 @@
@@ -92,7 +92,7 @@ index 24d7988b0..cc9346161 100644
              "browser_use": {
                "type": "boolean"
              },
-@@ -5967,6 +5979,18 @@
+@@ -6037,6 +6049,18 @@
          "bedrock_setup_wizard": {
            "type": "boolean"
          },
@@ -112,18 +112,10 @@ index 24d7988b0..cc9346161 100644
            "type": "boolean"
          },
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 141aaddc6..fb20881e9 100644
+index 6435d93..a5a7bf1 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -59,6 +59,7 @@ use codex_thread_store::LoadThreadHistoryParams;
- use codex_thread_store::ReadThreadParams;
- use serde::Serialize;
- use std::collections::HashMap;
-+use std::collections::HashSet;
- use std::collections::VecDeque;
- use std::sync::Arc;
- use std::sync::Weak;
-@@ -105,7 +106,44 @@ pub(crate) struct LiveAgent {
+@@ -111,7 +111,44 @@ pub(crate) struct LiveAgent {
  #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
  pub(crate) struct ListedAgent {
      pub(crate) agent_name: String,
@@ -169,31 +161,64 @@ index 141aaddc6..fb20881e9 100644
  }
  
  /// Control-plane handle for multi-agent operations.
-@@ -476,22 +514,33 @@ impl AgentControl {
-         &self,
-         parent_thread_id: ThreadId,
-     ) -> String {
+@@ -495,49 +532,50 @@ impl AgentControl {
+                         .as_ref()
+                         .map(|path| path.name().to_string())
+                         .unwrap_or_else(|| thread_id.to_string());
+-                    format_subagent_context_line(&reference, metadata.agent_nickname.as_deref())
++                    format_subagent_context_line(
++                        &reference,
++                        metadata.agent_nickname.as_deref(),
++                        None,
++                    )
+                 })
+                 .collect::<Vec<_>>()
+                 .join("\n");
+         }
+ 
+-        let Some(parent_path) = self
+-            .state
+-            .agent_metadata_for_thread(parent_thread_id)
+-            .and_then(|metadata| metadata.agent_path)
+-        else {
 +        let Ok(state) = self.upgrade() else {
 +            return String::new();
 +        };
-         let Ok(agents) = self.open_thread_spawn_children(parent_thread_id).await else {
++        let Ok(agents) = self.open_thread_spawn_children(parent_thread_id).await else {
              return String::new();
          };
- 
--        agents
+-        let parent_prefix = format!("{parent_path}/");
+-        let mut agent_paths = self
+-            .state
+-            .live_agents()
 -            .into_iter()
--            .map(|(thread_id, metadata)| {
--                let reference = metadata
--                    .agent_path
--                    .as_ref()
--                    .map(|agent_path| agent_path.name().to_string())
--                    .unwrap_or_else(|| thread_id.to_string());
--                format_subagent_context_line(reference.as_str(), metadata.agent_nickname.as_deref())
+-            .filter_map(|metadata| metadata.agent_path)
+-            .filter(|path| {
+-                path.as_str()
+-                    .strip_prefix(&parent_prefix)
+-                    .is_some_and(|name| !name.contains('/'))
 -            })
--            .collect::<Vec<_>>()
--            .join("\n")
-+        let mut lines = Vec::with_capacity(agents.len());
+-            .collect::<Vec<_>>();
+-        let loaded_paths = self
+-            .open_thread_spawn_children(parent_thread_id)
+-            .await
+-            .unwrap_or_default()
+-            .into_iter()
+-            .filter_map(|(_, metadata)| metadata.agent_path)
+-            .collect::<HashSet<_>>();
+-        agent_paths.sort();
+-        // Stable sorting preserves alphabetical order within each group.
+-        agent_paths.sort_by_key(|path| !loaded_paths.contains(path));
+ 
+-        let mut lines = Vec::with_capacity(agent_paths.len().min(MAX_ENVIRONMENT_SUBAGENTS));
++        let mut lines = Vec::with_capacity(agents.len().min(MAX_ENVIRONMENT_SUBAGENTS));
+         let mut rendered_bytes = "  <subagents>\n  </subagents>\n".len();
+-        for agent_path in agent_paths {
 +        for (thread_id, metadata) in agents {
+             if lines.len() == MAX_ENVIRONMENT_SUBAGENTS {
+                 break;
+             }
+-            let line = format!(r#"<agent name="{agent_path}" />"#);
 +            let reference = metadata
 +                .agent_path
 +                .as_ref()
@@ -205,17 +230,20 @@ index 141aaddc6..fb20881e9 100644
 +            } else {
 +                AgentAvailability::Unloaded
 +            };
-+            lines.push(format_subagent_context_line(
-+                reference.as_str(),
-+                metadata.agent_nickname.as_deref(),
-+                Some(availability.as_str()),
-+            ));
-+        }
-+        lines.join("\n")
-     }
- 
-     pub(crate) async fn list_agents(
-@@ -525,16 +574,38 @@ impl AgentControl {
++            let nickname = metadata
++                .agent_nickname
++                .as_deref()
++                .filter(|nickname| !nickname.is_empty())
++                .map(|nickname| format!(r#" nickname=\"{nickname}\""#))
++                .unwrap_or_default();
++            let line = format!(
++                r#"<agent name=\"{reference}\"{nickname} availability=\"{}\" />"#,
++                availability.as_str()
++            );
+             let line_bytes = "    \n".len() + line.len();
+             if rendered_bytes + line_bytes <= MAX_ENVIRONMENT_SUBAGENT_BYTES {
+                 rendered_bytes += line_bytes;
+@@ -578,16 +616,38 @@ impl AgentControl {
          });
  
          let root_path = AgentPath::root();
@@ -256,7 +284,7 @@ index 141aaddc6..fb20881e9 100644
              });
          }
  
-@@ -548,19 +619,35 @@ impl AgentControl {
+@@ -601,19 +661,35 @@ impl AgentControl {
              {
                  continue;
              }
@@ -299,7 +327,7 @@ index 141aaddc6..fb20881e9 100644
          }
  
          Ok(agents)
-@@ -773,10 +860,45 @@ impl AgentControl {
+@@ -826,10 +902,45 @@ impl AgentControl {
          &self,
          parent_thread_id: ThreadId,
      ) -> CodexResult<Vec<(ThreadId, AgentMetadata)>> {
@@ -349,7 +377,7 @@ index 141aaddc6..fb20881e9 100644
      }
  
      async fn live_thread_spawn_children(
-@@ -849,6 +971,20 @@ impl AgentControl {
+@@ -902,6 +1013,20 @@ impl AgentControl {
          &self,
          root_thread_id: ThreadId,
      ) -> CodexResult<Vec<ThreadId>> {
@@ -371,7 +399,7 @@ index 141aaddc6..fb20881e9 100644
          let mut descendants = Vec::new();
          let mut stack = children_by_parent
 diff --git a/codex-rs/core/src/agent/control/legacy.rs b/codex-rs/core/src/agent/control/legacy.rs
-index f6bff6cd9..ceb3e57fb 100644
+index f6bff6c..ceb3e57 100644
 --- a/codex-rs/core/src/agent/control/legacy.rs
 +++ b/codex-rs/core/src/agent/control/legacy.rs
 @@ -48,6 +48,11 @@ impl AgentControl {
@@ -427,10 +455,10 @@ index f6bff6cd9..ceb3e57fb 100644
          for descendant_id in descendant_ids {
              match self.shutdown_live_agent(descendant_id).await {
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index e5518b272..d06a54c93 100644
+index 306e770..47289c8 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -823,6 +823,8 @@ impl AgentControl {
+@@ -841,6 +841,8 @@ impl AgentControl {
  
          let parent_thread_id = *parent_thread_id;
          let parent_thread = state.get_thread(parent_thread_id).await?;
@@ -439,10 +467,10 @@ index e5518b272..d06a54c93 100644
          let (subagent_developer_instructions, parent_developer_instructions) = match (
              multi_agent_version,
              config
-@@ -917,6 +919,11 @@ impl AgentControl {
-         // Compaction stores response items separately, so sanitize both top-level messages and
-         // compacted replacement histories with the same policy.
-         let retain_forked_item = |response_item: &mut ResponseItem, replaced: &mut bool| {
+@@ -948,6 +950,11 @@ impl AgentControl {
+                     .inherited_user_message = true;
+             }
+             let response_item = &mut envelope.item;
 +            if boss_projection
 +                && !crate::context_manager::boss_projection::durable_worker_item(response_item)
 +            {
@@ -451,7 +479,7 @@ index e5518b272..d06a54c93 100644
              if matches!(response_item, ResponseItem::AgentMessage { .. }) {
                  return false;
              }
-@@ -974,7 +981,10 @@ impl AgentControl {
+@@ -1006,7 +1013,10 @@ impl AgentControl {
              true
          };
          forked_rollout_items.retain_mut(|item| {
@@ -464,7 +492,7 @@ index e5518b272..d06a54c93 100644
                      && matches!(
                          &*item,
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index a7acf9316..c5e171671 100644
+index 61ebf71..ed901b8 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -909,6 +909,22 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
@@ -482,7 +510,7 @@ index a7acf9316..c5e171671 100644
 +                ResponseItem::Message { content, .. }
 +                    if content.iter().any(|content| matches!(
 +                        content,
-+                        ContentItem::OutputText { text } if text == "child persisted"
++                        ContentItem::InputText { text } if text == "hello child"
 +                    ))
 +            )),
 +        "residency reload must retain the original worker history"
@@ -491,10 +519,10 @@ index a7acf9316..c5e171671 100644
          let reloaded_turn = reloaded_child.session.new_default_turn().await;
          assert_eq!(
 diff --git a/codex-rs/core/src/apply_patch.rs b/codex-rs/core/src/apply_patch.rs
-index 1283d0cd9..fc4ea0f32 100644
+index 9b3c7a2..eb63a4d 100644
 --- a/codex-rs/core/src/apply_patch.rs
 +++ b/codex-rs/core/src/apply_patch.rs
-@@ -3,6 +3,7 @@ use crate::safety::SafetyCheck;
+@@ -4,6 +4,7 @@ use crate::safety::SafetyCheck;
  use crate::safety::assess_patch_safety;
  use crate::session::step_context::StepContext;
  use crate::session::turn_context::TurnEnvironment;
@@ -502,8 +530,8 @@ index 1283d0cd9..fc4ea0f32 100644
  use crate::tools::sandboxing::ExecApprovalRequirement;
  use codex_apply_patch::ApplyPatchAction;
  use codex_apply_patch::ApplyPatchFileChange;
-@@ -25,6 +26,13 @@ pub(crate) fn prepare_apply_patch(
-     file_system_sandbox_policy: &FileSystemSandboxPolicy,
+@@ -29,6 +30,13 @@ pub(crate) fn prepare_apply_patch(
+     sandbox_route: PatchSandboxRoute,
      action: ApplyPatchAction,
  ) -> Result<ApplyPatchRuntimeInvocation, FunctionCallError> {
 +    if boss_main_execution_isolation_active(&step_context.turn) {
@@ -517,10 +545,10 @@ index 1283d0cd9..fc4ea0f32 100644
          &action,
          step_context.settings.approval_policy(),
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 8796f539b..14b129e27 100644
+index a093aaf..d0af5e8 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -12901,3 +12901,99 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
+@@ -12947,3 +12947,99 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
  
      Ok(())
  }
@@ -621,10 +649,10 @@ index 8796f539b..14b129e27 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index dca329ab9..cc5c23978 100644
+index ebda977..5b45ff7 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -644,6 +644,16 @@ pub struct Config {
+@@ -646,6 +646,16 @@ pub struct Config {
      /// Effective permission configuration for shell tool execution.
      pub permissions: Permissions,
  
@@ -641,7 +669,7 @@ index dca329ab9..cc5c23978 100644
      /// Whether config explicitly selected named permissions profiles instead
      /// of the legacy `sandbox_mode` syntax.
      pub explicit_permission_profile_mode: bool,
-@@ -1611,6 +1621,9 @@ impl Config {
+@@ -1622,6 +1632,9 @@ impl Config {
                      Some(BaseInstructionsProvenance::Model { .. })
                  )
              }),
@@ -651,7 +679,7 @@ index dca329ab9..cc5c23978 100644
              personality_enabled: self.features.enabled(Feature::Personality),
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
-@@ -3896,7 +3909,29 @@ impl Config {
+@@ -3919,7 +3932,29 @@ impl Config {
          let base_instructions_provenance = base_instructions
              .as_ref()
              .map(|_| BaseInstructionsProvenance::Custom);
@@ -682,7 +710,7 @@ index dca329ab9..cc5c23978 100644
          let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
          let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
          let include_collaboration_mode_instructions =
-@@ -4155,6 +4190,8 @@ impl Config {
+@@ -4175,6 +4210,8 @@ impl Config {
                  windows_sandbox_mode,
                  windows_sandbox_private_desktop,
              },
@@ -693,7 +721,7 @@ index dca329ab9..cc5c23978 100644
              approvals_reviewer: constrained_approvals_reviewer.value(),
 diff --git a/codex-rs/core/src/context/connector_inventory.rs b/codex-rs/core/src/context/connector_inventory.rs
 new file mode 100644
-index 000000000..c068aaea2
+index 0000000..c068aae
 --- /dev/null
 +++ b/codex-rs/core/src/context/connector_inventory.rs
 @@ -0,0 +1,58 @@
@@ -756,7 +784,7 @@ index 000000000..c068aaea2
 +    }
 +}
 diff --git a/codex-rs/core/src/context/inter_agent_completion_message.rs b/codex-rs/core/src/context/inter_agent_completion_message.rs
-index ec04c4f1b..6ad27d01a 100644
+index ec04c4f..6ad27d0 100644
 --- a/codex-rs/core/src/context/inter_agent_completion_message.rs
 +++ b/codex-rs/core/src/context/inter_agent_completion_message.rs
 @@ -39,7 +39,7 @@ impl ContextualUserFragment for InterAgentCompletionMessage {
@@ -769,7 +797,7 @@ index ec04c4f1b..6ad27d01a 100644
          )
      }
 diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
-index 58ad8140c..0c74f1d0e 100644
+index 23b5a97..2646caf 100644
 --- a/codex-rs/core/src/context/mod.rs
 +++ b/codex-rs/core/src/context/mod.rs
 @@ -2,6 +2,7 @@
@@ -780,7 +808,7 @@ index 58ad8140c..0c74f1d0e 100644
  mod available_plugins_instructions;
  mod base_instructions;
  mod compaction_summary;
-@@ -50,6 +51,7 @@ pub(crate) mod world_state;
+@@ -52,6 +53,7 @@ pub(crate) mod world_state;
  pub(crate) use approved_command_prefix_saved::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
  pub(crate) use approved_command_prefix_saved::ApprovedCommandPrefixSaved;
  pub(crate) use apps_instructions::AppsInstructions;
@@ -790,7 +818,7 @@ index 58ad8140c..0c74f1d0e 100644
  pub(crate) use codex_context_fragments::AdditionalContextDeveloperFragment;
 diff --git a/codex-rs/core/src/context/world_state/connector_inventory.rs b/codex-rs/core/src/context/world_state/connector_inventory.rs
 new file mode 100644
-index 000000000..7b98f968d
+index 0000000..7b98f96
 --- /dev/null
 +++ b/codex-rs/core/src/context/world_state/connector_inventory.rs
 @@ -0,0 +1,50 @@
@@ -845,7 +873,7 @@ index 000000000..7b98f968d
 +    }
 +}
 diff --git a/codex-rs/core/src/context/world_state/mod.rs b/codex-rs/core/src/context/world_state/mod.rs
-index 249e4c80f..d5867763c 100644
+index 249e4c8..d586776 100644
 --- a/codex-rs/core/src/context/world_state/mod.rs
 +++ b/codex-rs/core/src/context/world_state/mod.rs
 @@ -1,6 +1,7 @@
@@ -866,7 +894,7 @@ index 249e4c80f..d5867763c 100644
  pub(crate) use environment::EnvironmentsState;
 diff --git a/codex-rs/core/src/context_manager/boss_projection.rs b/codex-rs/core/src/context_manager/boss_projection.rs
 new file mode 100644
-index 000000000..84c8e2a51
+index 0000000..84c8e2a
 --- /dev/null
 +++ b/codex-rs/core/src/context_manager/boss_projection.rs
 @@ -0,0 +1,96 @@
@@ -968,7 +996,7 @@ index 000000000..84c8e2a51
 +mod tests;
 diff --git a/codex-rs/core/src/context_manager/boss_projection_tests.rs b/codex-rs/core/src/context_manager/boss_projection_tests.rs
 new file mode 100644
-index 000000000..d25b0cb81
+index 0000000..d25b0cb
 --- /dev/null
 +++ b/codex-rs/core/src/context_manager/boss_projection_tests.rs
 @@ -0,0 +1,82 @@
@@ -1055,7 +1083,7 @@ index 000000000..d25b0cb81
 +    );
 +}
 diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
-index af520df6c..980fe9063 100644
+index af520df..980fe90 100644
 --- a/codex-rs/core/src/context_manager/mod.rs
 +++ b/codex-rs/core/src/context_manager/mod.rs
 @@ -1,3 +1,4 @@
@@ -1064,10 +1092,10 @@ index af520df6c..980fe9063 100644
  mod normalize;
  pub(crate) mod updates;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 91300365b..5c9a411a6 100644
+index 8ffc144..23e9c9d 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -483,6 +483,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+@@ -488,6 +488,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
  const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
  const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
  
@@ -1131,7 +1159,7 @@ index 91300365b..5c9a411a6 100644
  impl Session {
      /// Spawn and initialize a new session.
      /// Hide the concrete startup future from callers while keeping initialization lazy.
-@@ -569,6 +626,7 @@ impl Session {
+@@ -574,6 +631,7 @@ impl Session {
          config
              .startup_warnings
              .extend(user_instruction_provider_warnings);
@@ -1139,7 +1167,7 @@ index 91300365b..5c9a411a6 100644
          let exec_policy = if crate::guardian::is_basic_session_source(&session_source) {
              let managed_policy = config
                  .config_layer_stack
-@@ -695,12 +753,47 @@ impl Session {
+@@ -711,12 +769,47 @@ impl Session {
          let history_mode = conversation_history.get_history_mode(
              requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
          );
@@ -1188,7 +1216,7 @@ index 91300365b..5c9a411a6 100644
          // Dynamic tools are defined at thread start and persisted in rollout session metadata.
          let dynamic_tools = if dynamic_tools.is_empty() {
              conversation_history.get_dynamic_tools().unwrap_or_default()
-@@ -841,6 +934,32 @@ impl Session {
+@@ -857,6 +950,32 @@ impl Session {
      }
  }
  
@@ -1222,10 +1250,10 @@ index 91300365b..5c9a411a6 100644
      /// Submit the `op` wrapped in a `Submission` with a unique ID.
      pub(crate) async fn submit(&self, op: Op) -> CodexResult<String> {
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 6d1953e3a..b5d41b546 100644
+index a3e6b17..d8ac5b3 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -165,6 +165,34 @@ impl SessionConfiguration {
+@@ -167,6 +167,34 @@ impl SessionConfiguration {
          self.permission_profile_state.permission_profile().clone()
      }
  
@@ -1260,7 +1288,7 @@ index 6d1953e3a..b5d41b546 100644
      fn materialized_permission_profile(
          &self,
          environments: &[TurnEnvironmentSelection],
-@@ -397,12 +425,39 @@ impl SessionConfiguration {
+@@ -399,12 +427,39 @@ impl SessionConfiguration {
                          None
                      }
                  });
@@ -1306,7 +1334,7 @@ index 6d1953e3a..b5d41b546 100644
              if let Some(active_permission_profile) = next_configuration.active_permission_profile()
              {
                  let mut config = (*next_configuration.original_config_do_not_use).clone();
-@@ -438,15 +493,25 @@ impl SessionConfiguration {
+@@ -440,15 +495,25 @@ impl SessionConfiguration {
                      &current_file_system_sandbox_policy,
                  );
              let network_sandbox_policy = NetworkSandboxPolicy::from(&sandbox_policy);
@@ -1342,7 +1370,7 @@ index 6d1953e3a..b5d41b546 100644
              // Compatibility projection can resolve filesystem paths. Only compute it
              // when a cwd-bound legacy policy might need rebinding.
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
-index 49502e8a6..58bbdd848 100644
+index 49502e8..58bbdd8 100644
 --- a/codex-rs/core/src/session/step_settings.rs
 +++ b/codex-rs/core/src/session/step_settings.rs
 @@ -183,6 +183,9 @@ pub(crate) struct ModelInfoOverrides {
@@ -1372,10 +1400,10 @@ index 49502e8a6..58bbdd848 100644
              personality_enabled,
              // The models manager already owns its catalog.
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index b5931b330..2bdb25653 100644
+index 116e450..bb2bc2e 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -1674,6 +1674,120 @@ async fn get_base_instructions_no_user_content() {
+@@ -1675,6 +1675,120 @@ async fn get_base_instructions_no_user_content() {
      }
  }
  
@@ -1496,7 +1524,7 @@ index b5931b330..2bdb25653 100644
  #[tokio::test]
  async fn reload_user_config_layer_updates_effective_apps_config() {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -12238,6 +12352,8 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -12279,6 +12393,8 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
          turn_store: Arc::new(codex_extension_api::ExtensionData::new(tc.sub_id.clone())),
          tool_runtime: test_tool_runtime(Arc::clone(&sess), Arc::clone(&tc)),
          cancellation_token: CancellationToken::new(),
@@ -1506,10 +1534,10 @@ index b5931b330..2bdb25653 100644
  
      let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index f7c42680c..91454e76f 100644
+index 4719e1d..659e5ca 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -39,6 +39,7 @@ use crate::session::session::Session;
+@@ -40,6 +40,7 @@ use crate::session::session::Session;
  use crate::session::step_context::StepContext;
  use crate::session::turn_context::TurnContext;
  use crate::skills::emit_explicit_skill_invocations;
@@ -1517,7 +1545,7 @@ index f7c42680c..91454e76f 100644
  use crate::stream_events_utils::HandleOutputCtx;
  use crate::stream_events_utils::InFlightFuture;
  use crate::stream_events_utils::TurnItemContributorPolicy;
-@@ -1351,11 +1352,14 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+@@ -1385,11 +1386,14 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
  
  #[instrument(level = "trace", skip_all)]
  pub(crate) fn build_prompt(
@@ -1533,7 +1561,7 @@ index f7c42680c..91454e76f 100644
      Prompt {
          input,
          tools: step_context.tool_router.model_visible_specs(),
-@@ -2270,6 +2274,11 @@ async fn try_run_sampling_request(
+@@ -2316,6 +2320,11 @@ async fn try_run_sampling_request(
          .instrument(trace_span!("stream_request"))
          .or_cancel(&cancellation_token)
          .await??;
@@ -1545,8 +1573,8 @@ index f7c42680c..91454e76f 100644
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
-@@ -2346,6 +2355,13 @@ async fn try_run_sampling_request(
-             ResponseEvent::Created => {}
+@@ -2398,6 +2407,13 @@ async fn try_run_sampling_request(
+             }
              ResponseEvent::OutputItemDone(mut item) => {
                  assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
 +                if last_assistant_message_from_item(&item, plan_mode).is_some()
@@ -1559,7 +1587,7 @@ index f7c42680c..91454e76f 100644
                  if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                      let call_id = match &item {
                          ResponseItem::FunctionCall { call_id, .. }
-@@ -2408,6 +2424,7 @@ async fn try_run_sampling_request(
+@@ -2460,6 +2476,7 @@ async fn try_run_sampling_request(
                      turn_store: Arc::clone(&turn_store),
                      tool_runtime: tool_runtime.clone(),
                      cancellation_token: cancellation_token.child_token(),
@@ -1568,7 +1596,7 @@ index f7c42680c..91454e76f 100644
  
                  let preempt_for_mailbox_mail = match &item {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e5a371e9d..305682972 100644
+index 8df4f1c..0596dab 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -19,6 +19,8 @@ use codex_protocol::SessionId;
@@ -1610,7 +1638,7 @@ index e5a371e9d..305682972 100644
      pub(crate) fn sandbox_context(
          &self,
 diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
-index 322dbbd56..ddad0d29f 100644
+index 1253a9f..aa2ecaa 100644
 --- a/codex-rs/core/src/session/world_state.rs
 +++ b/codex-rs/core/src/session/world_state.rs
 @@ -8,6 +8,7 @@ use crate::context::TokenBudgetContext;
@@ -1621,7 +1649,7 @@ index 322dbbd56..ddad0d29f 100644
  use crate::context::world_state::CompactPermissionsState;
  use crate::context::world_state::ContextWindowGuidanceState;
  use crate::context::world_state::EnvironmentsInstructionsState;
-@@ -262,6 +263,27 @@ impl Session {
+@@ -265,6 +266,27 @@ impl Session {
              } else {
                  false
              };
@@ -1650,7 +1678,7 @@ index 322dbbd56..ddad0d29f 100644
              apps_available && turn_context.model_info().include_apps_usage_instructions;
          world_state.add_section(AppsInstructionsState::new(
 diff --git a/codex-rs/core/src/session_prefix.rs b/codex-rs/core/src/session_prefix.rs
-index 315ef1cab..d00eb8e3e 100644
+index 315ef1c..d00eb8e 100644
 --- a/codex-rs/core/src/session_prefix.rs
 +++ b/codex-rs/core/src/session_prefix.rs
 @@ -42,9 +42,14 @@ mod tests;
@@ -1671,7 +1699,7 @@ index 315ef1cab..d00eb8e3e 100644
      }
  }
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index a75dbe2af..af36f9c53 100644
+index 8c87eaf..4a98efd 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -1,5 +1,7 @@
@@ -1799,7 +1827,7 @@ index a75dbe2af..af36f9c53 100644
          Ok(Some(call)) => {
              ctx.sess
 diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
-index 3ccaea092..177c63f1b 100644
+index 3ccaea0..177c63f 100644
 --- a/codex-rs/core/src/stream_events_utils_tests.rs
 +++ b/codex-rs/core/src/stream_events_utils_tests.rs
 @@ -1,3 +1,4 @@
@@ -1857,7 +1885,7 @@ index 3ccaea092..177c63f1b 100644
  
      let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
 diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
-index 4012d972f..c59752779 100644
+index 4012d97..c597527 100644
 --- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
 +++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
 @@ -1,4 +1,5 @@
@@ -1881,7 +1909,7 @@ index 4012d972f..c59752779 100644
              session.services.analytics_events_client.clone(),
              session.thread_id.to_string(),
 diff --git a/codex-rs/core/src/tools/handlers/apply_patch.rs b/codex-rs/core/src/tools/handlers/apply_patch.rs
-index b945bf6fb..a9d487561 100644
+index 0f52889..00c126e 100644
 --- a/codex-rs/core/src/tools/handlers/apply_patch.rs
 +++ b/codex-rs/core/src/tools/handlers/apply_patch.rs
 @@ -14,6 +14,7 @@ use crate::session::session::Session;
@@ -1892,7 +1920,7 @@ index b945bf6fb..a9d487561 100644
  use crate::tools::context::ApplyPatchToolOutput;
  use crate::tools::context::FunctionToolOutput;
  use crate::tools::context::SharedTurnDiffTracker;
-@@ -387,6 +388,12 @@ impl ApplyPatchHandler {
+@@ -377,6 +378,12 @@ impl ApplyPatchHandler {
                  "apply_patch handler received unsupported payload".to_string(),
              ));
          };
@@ -1906,7 +1934,7 @@ index b945bf6fb..a9d487561 100644
              Ok(args) => args,
              Err(parse_error) => {
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_common.rs b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
-index 77442ad43..0a7a02702 100644
+index 9cbe72d..ff6c8ec 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_common.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
 @@ -4,10 +4,12 @@ use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
@@ -1953,7 +1981,7 @@ index 77442ad43..0a7a02702 100644
      Ok(config)
  }
  
-@@ -247,14 +263,25 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
+@@ -250,14 +266,25 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
      #[allow(deprecated)]
      let turn_cwd = turn.cwd.clone();
      config.cwd = turn_cwd;
@@ -1986,7 +2014,7 @@ index 77442ad43..0a7a02702 100644
              FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
          })?;
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
-index 8d9d48ef3..608eb292f 100644
+index 8d9d48e..608eb29 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 @@ -197,7 +197,7 @@ pub fn create_send_message_tool() -> ToolSpec {
@@ -2057,7 +2085,7 @@ index 8d9d48ef3..608eb292f 100644
  
  Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
-index 9e100aa3b..64652a2a3 100644
+index 9e100aa..64652a2 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
 @@ -449,7 +449,7 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
@@ -2079,7 +2107,7 @@ index 9e100aa3b..64652a2a3 100644
              "pending_init",
              "running",
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 0979e8b1e..89d039422 100644
+index f9c7b48..df7a017 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -209,6 +209,7 @@ struct ListAgentsResult {
@@ -2131,7 +2159,7 @@ index 0979e8b1e..89d039422 100644
  }
  
  #[tokio::test]
-@@ -4463,6 +4479,39 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
+@@ -4484,6 +4500,39 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
      assert_eq!(config, expected);
  }
  
@@ -2172,7 +2200,7 @@ index 0979e8b1e..89d039422 100644
  async fn build_agent_resume_config_clears_base_instructions() {
      let (_session, mut turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
-index b82bdd6a0..3d85880f2 100644
+index b82bdd6..3d85880 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
 @@ -61,6 +61,7 @@ fn communication_from_tool_message(
@@ -2193,7 +2221,7 @@ index b82bdd6a0..3d85880f2 100644
      } else {
          InterAgentMessageType::Message
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
-index 9f0ac3cb1..c869f67e0 100644
+index a88c765..832855c 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
 @@ -1,7 +1,8 @@
@@ -2207,7 +2235,7 @@ index 9f0ac3cb1..c869f67e0 100644
  
  use super::analytics::ToolCallAnalytics;
  use super::*;
-@@ -11,16 +12,14 @@ use crate::tools::context::FunctionToolOutput;
+@@ -11,14 +12,15 @@ use crate::tools::context::FunctionToolOutput;
  
  #[derive(Clone, Copy, PartialEq, Eq)]
  pub(crate) enum MessageDeliveryMode {
@@ -2218,19 +2246,20 @@ index 9f0ac3cb1..c869f67e0 100644
  }
  
  impl MessageDeliveryMode {
-     fn trigger_turn(self) -> bool {
--        match self {
+-    fn trigger_turn(self) -> bool {
++    fn trigger_turn(self, recipient: &AgentPath) -> bool {
+         match self {
 -            Self::QueueOnly => false,
--            Self::TriggerTurn => true,
--        }
-+        true
++            Self::WakeIfIdle => !recipient.is_root(),
+             Self::TriggerTurn => true,
+         }
      }
- }
- 
-@@ -102,9 +101,10 @@ pub(super) async fn handle_message_string_tool(
+@@ -101,10 +103,11 @@ pub(super) async fn handle_message_string_tool(
+         receiver_agent_path.clone(),
          message,
          &source,
-         mode.trigger_turn(),
+-        mode.trigger_turn(),
++        mode.trigger_turn(&receiver_agent_path),
 +        mode == MessageDeliveryMode::TriggerTurn,
      );
      let kind = match mode {
@@ -2240,7 +2269,7 @@ index 9f0ac3cb1..c869f67e0 100644
      };
      let context = AgentCommunicationContext::new(kind, session.thread_id);
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
-index 70fc7d435..b91f6de43 100644
+index 70fc7d4..b91f6de 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
 @@ -40,7 +40,7 @@ impl Handler {
@@ -2253,7 +2282,7 @@ index 70fc7d435..b91f6de43 100644
              args.message,
              analytics,
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
-index 3684156f9..71c2d2902 100644
+index 41d3942..51a0a9b 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
 @@ -175,6 +175,7 @@ async fn handle_spawn_agent(
@@ -2265,7 +2294,7 @@ index 3684156f9..71c2d2902 100644
      let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
      let multi_agent_v2_usage_hints =
 diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
-index b39408a37..bf532bf4d 100644
+index b39408a..bf532bf 100644
 --- a/codex-rs/core/src/tools/handlers/shell_spec.rs
 +++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
 @@ -92,17 +92,18 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
@@ -2297,7 +2326,7 @@ index b39408a37..bf532bf4d 100644
          defer_loading: None,
          parameters: JsonSchema::object(
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
-index 8b97ff06b..e3a693cbb 100644
+index a8d0fb9..7310ec8 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 @@ -6,6 +6,7 @@ use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
@@ -2308,7 +2337,7 @@ index 8b97ff06b..e3a693cbb 100644
  use crate::tools::context::ExecCommandToolOutput;
  use crate::tools::context::ToolInvocation;
  use crate::tools::context::ToolPayload;
-@@ -173,7 +174,7 @@ impl ExecCommandHandler {
+@@ -184,7 +185,7 @@ impl ExecCommandHandler {
              call_id.clone(),
          );
          let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
@@ -2317,7 +2346,7 @@ index 8b97ff06b..e3a693cbb 100644
              &step_context.environments,
              environment_args.environment_id.as_deref(),
          )?
-@@ -182,6 +183,18 @@ impl ExecCommandHandler {
+@@ -193,6 +194,18 @@ impl ExecCommandHandler {
                  "unified exec is unavailable in this session".to_string(),
              ));
          };
@@ -2336,8 +2365,8 @@ index 8b97ff06b..e3a693cbb 100644
          let native_environment_cwd = turn_environment.cwd().clone();
          let cwd = environment_args
              .workdir
-@@ -232,6 +245,15 @@ impl ExecCommandHandler {
-         };
+@@ -248,6 +261,15 @@ impl ExecCommandHandler {
+         }
          let sandbox_permissions =
              resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
 +        if boss_main
@@ -2352,7 +2381,7 @@ index 8b97ff06b..e3a693cbb 100644
          let hook_command = args.cmd.clone();
          maybe_emit_implicit_skill_invocation(
              session.as_ref(),
-@@ -301,8 +323,9 @@ impl ExecCommandHandler {
+@@ -317,8 +339,9 @@ impl ExecCommandHandler {
              }
          };
  
@@ -2364,7 +2393,7 @@ index 8b97ff06b..e3a693cbb 100644
          let requested_additional_permissions = additional_permissions.clone();
          let sandbox_context =
              turn_environment.sandbox_context(/*additional_permissions*/ None);
-@@ -314,14 +337,24 @@ impl ExecCommandHandler {
+@@ -330,14 +353,24 @@ impl ExecCommandHandler {
                  "selected environment sandbox context is missing cwd".to_string(),
              ));
          };
@@ -2392,7 +2421,7 @@ index 8b97ff06b..e3a693cbb 100644
              || (session.features().enabled(Feature::RequestPermissionsTool)
                  && effective_additional_permissions.permissions_preapproved);
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
-index 657da4667..52b221f2d 100644
+index 657da46..52b221f 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
 @@ -1,4 +1,5 @@
@@ -2415,7 +2444,7 @@ index 657da4667..52b221f2d 100644
              UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
          let response = session
 diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
-index ff1b6d063..e98bb2768 100644
+index ff1b6d0..e98bb27 100644
 --- a/codex-rs/core/src/tools/mod.rs
 +++ b/codex-rs/core/src/tools/mod.rs
 @@ -66,6 +66,19 @@ pub(crate) fn tool_user_shell_type(
@@ -2459,7 +2488,7 @@ index ff1b6d063..e98bb2768 100644
      let requested_tool_mode = requested_tool_mode(turn_context, model_info);
      if !turn_context.code_mode_available
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index 7de566390..7053f61ea 100644
+index 7de5663..7053f61 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
 @@ -70,6 +70,12 @@ impl ToolCallRuntime {
@@ -2476,7 +2505,7 @@ index 7de566390..7053f61ea 100644
      pub(crate) fn handle_tool_call(
          self,
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index e73711f8e..50ee65d37 100644
+index e73711f..50ee65d 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
 @@ -45,6 +45,13 @@ use serde_json::Value;
@@ -2604,7 +2633,7 @@ index e73711f8e..50ee65d37 100644
              }
              Entry::Occupied(entry) => {
 diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
-index 8d5bde308..912150d41 100644
+index 8d5bde3..912150d 100644
 --- a/codex-rs/core/src/tools/router.rs
 +++ b/codex-rs/core/src/tools/router.rs
 @@ -77,6 +77,7 @@ pub struct ToolRouter {
@@ -2656,7 +2685,7 @@ index 8d5bde308..912150d41 100644
      fn exposes_tool(&self, name: &ToolName) -> bool {
          let name = name.clone().with_default_namespace();
 diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
-index 1d6b1d322..1410e172c 100644
+index 1d6b1d3..1410e17 100644
 --- a/codex-rs/core/src/tools/router_tests.rs
 +++ b/codex-rs/core/src/tools/router_tests.rs
 @@ -7,6 +7,7 @@ use crate::session::tests::make_session_and_context;
@@ -2676,7 +2705,7 @@ index 1d6b1d322..1410e172c 100644
  }
  
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 908bb143a..b1b23488e 100644
+index 01054b1..fe9fce6 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -4,6 +4,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -2687,7 +2716,7 @@ index 908bb143a..b1b23488e 100644
  use crate::tools::code_mode::execute_spec::create_code_mode_tool;
  use crate::tools::context::ToolInvocation;
  use crate::tools::effective_tool_mode;
-@@ -53,6 +54,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
+@@ -54,6 +55,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
  use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
  use crate::tools::hosted_spec::WebSearchToolOptions;
  use crate::tools::hosted_spec::create_web_search_tool;
@@ -2695,7 +2724,7 @@ index 908bb143a..b1b23488e 100644
  use crate::tools::registry::CoreToolRuntime;
  #[cfg(test)]
  use crate::tools::registry::RegisteredTool;
-@@ -176,7 +178,12 @@ pub(crate) fn build_tool_router(
+@@ -177,7 +179,12 @@ pub(crate) fn build_tool_router(
              extension_tool_executors(session, step_store),
              &mut registry,
          );
@@ -2709,7 +2738,7 @@ index 908bb143a..b1b23488e 100644
          hosted_model_tool_specs(
              turn_context,
              model_info,
-@@ -311,8 +318,10 @@ pub(crate) fn append_source_tools(
+@@ -312,8 +319,10 @@ pub(crate) fn append_source_tools(
          return Vec::new();
      }
  
@@ -2722,7 +2751,7 @@ index 908bb143a..b1b23488e 100644
      }
      let standalone_web_search_tool = append_extension_tool_executors(
          turn_context,
-@@ -320,7 +329,11 @@ pub(crate) fn append_source_tools(
+@@ -321,7 +330,11 @@ pub(crate) fn append_source_tools(
          extension_tool_executors,
          registry,
      );
@@ -2735,7 +2764,7 @@ index 908bb143a..b1b23488e 100644
      hosted_model_tool_specs(
          turn_context,
          model_info,
-@@ -355,6 +368,7 @@ pub(crate) fn finalize_tool_router(
+@@ -356,6 +369,7 @@ pub(crate) fn finalize_tool_router(
      hosted_specs: Vec<ToolSpec>,
      tool_search_handler_cache: &ToolSearchHandlerCache,
  ) -> CodexResult<ToolRouter> {
@@ -2743,7 +2772,7 @@ index 908bb143a..b1b23488e 100644
      apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
      let tool_mode = effective_tool_mode(turn_context, model_info);
      let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
-@@ -369,7 +383,8 @@ pub(crate) fn finalize_tool_router(
+@@ -370,7 +384,8 @@ pub(crate) fn finalize_tool_router(
          }
      }
      let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
@@ -2753,7 +2782,7 @@ index 908bb143a..b1b23488e 100644
          && registry.entries().any(|tool| {
              tool.runtime.tool_name() != tool_search_name
                  && tool.exposure.is_deferred()
-@@ -526,6 +541,21 @@ fn apply_direct_model_only_namespace_overrides(
+@@ -527,6 +542,21 @@ fn apply_direct_model_only_namespace_overrides(
      }
  }
  
@@ -2775,7 +2804,7 @@ index 908bb143a..b1b23488e 100644
  #[instrument(level = "trace", skip_all)]
  fn build_model_visible_specs(
      turn_context: &TurnContext,
-@@ -534,14 +564,39 @@ fn build_model_visible_specs(
+@@ -535,14 +565,39 @@ fn build_model_visible_specs(
      code_mode_tool_names: &BTreeMap<String, ToolName>,
      hosted_specs: Vec<ToolSpec>,
  ) -> Vec<ToolSpec> {
@@ -2817,7 +2846,7 @@ index 908bb143a..b1b23488e 100644
          if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure) {
              continue;
          }
-@@ -556,7 +611,17 @@ fn build_model_visible_specs(
+@@ -557,7 +612,17 @@ fn build_model_visible_specs(
              spec,
          ));
      }
@@ -2836,7 +2865,7 @@ index 908bb143a..b1b23488e 100644
  
      merge_into_namespaces(specs)
          .into_iter()
-@@ -566,6 +631,45 @@ fn build_model_visible_specs(
+@@ -567,6 +632,45 @@ fn build_model_visible_specs(
          .collect()
  }
  
@@ -2882,7 +2911,7 @@ index 908bb143a..b1b23488e 100644
  fn spec_for_model_request(
      turn_context: &TurnContext,
      model_info: &ModelInfo,
-@@ -1024,8 +1128,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+@@ -1029,8 +1133,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
          return;
      }
  
@@ -2897,7 +2926,7 @@ index 908bb143a..b1b23488e 100644
      add_core_utility_tools(context, registry);
      add_collaboration_tools(context, registry);
  }
-@@ -1083,7 +1191,8 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
+@@ -1088,7 +1196,8 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
      }
  
      let allow_login_shell = any_environment_allows_login_shell(context.environments);
@@ -2907,7 +2936,7 @@ index 908bb143a..b1b23488e 100644
      let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
      let options = ExecCommandHandlerOptions {
          allow_login_shell,
-@@ -1134,11 +1243,15 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1140,11 +1249,15 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
      let environment_mode = tool_environment_mode(context.environments);
  
      if turn_context.config.update_plan_enabled {
@@ -2925,7 +2954,7 @@ index 908bb143a..b1b23488e 100644
              context
                  .wait_for_environment_tool_config
                  .map(Arc::as_ref)
-@@ -1146,15 +1259,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1152,15 +1265,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                      WaitForEnvironmentHandler::default,
                      WaitForEnvironmentHandler::new,
                  ),
@@ -2945,7 +2974,7 @@ index 908bb143a..b1b23488e 100644
          );
      }
  
-@@ -1171,7 +1287,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1177,7 +1293,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                  )
              })
      {
@@ -2954,12 +2983,16 @@ index 908bb143a..b1b23488e 100644
              RequestUserInputAsyncHandler {
                  description: context
                      .model_messages
-@@ -1180,16 +1296,28 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1186,6 +1302,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                      .and_then(|tool| tool.description.clone()),
              },
              ToolExposure::DirectModelOnly,
 +            BossMainToolCapability::Utility,
          );
+     }
+ 
+@@ -1199,13 +1316,24 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+         registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
      }
  
 -    if environment_mode.has_environment() && features.enabled(Feature::RequestPermissionsTool) {
@@ -2986,7 +3019,7 @@ index 908bb143a..b1b23488e 100644
      }
  
      let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);
-@@ -1199,7 +1327,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1215,7 +1343,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "clock");
      if current_time_reminder_enabled || model_has_clock {
@@ -2999,7 +3032,7 @@ index 908bb143a..b1b23488e 100644
      }
      if features.enabled(Feature::SleepTool)
          && match turn_context.config.sleep_tool_mode {
-@@ -1217,7 +1349,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1233,7 +1365,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              }
          }
      {
@@ -3012,7 +3045,7 @@ index 908bb143a..b1b23488e 100644
      }
  
      if tool_suggest_enabled(turn_context)
-@@ -1226,17 +1362,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1242,17 +1378,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              .filter(|candidates| !candidates.tools.is_empty())
      {
          if candidates.presentation == crate::tools::router::ToolSuggestPresentation::ListTool {
@@ -3046,7 +3079,7 @@ index 908bb143a..b1b23488e 100644
          let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
          registry.add(ApplyPatchHandler::new(include_environment_id));
      }
-@@ -1247,21 +1391,29 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1263,21 +1407,29 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "test_sync_tool")
      {
@@ -3087,7 +3120,7 @@ index 908bb143a..b1b23488e 100644
      }
  }
  
-@@ -1427,8 +1579,21 @@ fn append_extension_tool_executors(
+@@ -1443,8 +1595,21 @@ fn append_extension_tool_executors(
          {
              continue;
          }
@@ -3111,7 +3144,7 @@ index 908bb143a..b1b23488e 100644
          }
      }
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index c77936fc9..fa30162de 100644
+index c77936f..fa30162 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
 @@ -58,6 +58,7 @@ use crate::tools::handlers::ToolSearchHandlerCache;
@@ -3475,7 +3508,7 @@ index c77936fc9..fa30162de 100644
          };
          let plan = probe_with(
 diff --git a/codex-rs/core/src/turn_metadata.rs b/codex-rs/core/src/turn_metadata.rs
-index 56d962c1f..db11fdce1 100644
+index b15858a..457d7a8 100644
 --- a/codex-rs/core/src/turn_metadata.rs
 +++ b/codex-rs/core/src/turn_metadata.rs
 @@ -7,6 +7,7 @@ use std::sync::Mutex;
@@ -3486,7 +3519,7 @@ index 56d962c1f..db11fdce1 100644
  use std::sync::atomic::Ordering;
  
  use serde_json::Value;
-@@ -136,6 +137,12 @@ pub(crate) struct TurnMetadataState {
+@@ -140,6 +141,12 @@ pub(crate) struct TurnMetadataState {
      responses_api_metadata: RwLock<BTreeMap<String, String>>,
      responsesapi_client_metadata: RwLock<BTreeMap<String, String>>,
      user_input_requested_during_turn: AtomicBool,
@@ -3499,7 +3532,7 @@ index 56d962c1f..db11fdce1 100644
      enrichment_task: Mutex<Option<AbortOnDropHandle<()>>>,
      git_enrichment_complete: watch::Sender<bool>,
  }
-@@ -222,6 +229,9 @@ impl TurnMetadataState {
+@@ -226,6 +233,9 @@ impl TurnMetadataState {
              responses_api_metadata: RwLock::new(BTreeMap::new()),
              responsesapi_client_metadata: RwLock::new(BTreeMap::new()),
              user_input_requested_during_turn: AtomicBool::new(false),
@@ -3509,7 +3542,7 @@ index 56d962c1f..db11fdce1 100644
              enrichment_task: Mutex::new(None),
              git_enrichment_complete: watch::channel(/*init*/ true).0,
          }
-@@ -290,6 +300,61 @@ impl TurnMetadataState {
+@@ -298,6 +308,61 @@ impl TurnMetadataState {
              .store(true, Ordering::Relaxed);
      }
  
@@ -3572,10 +3605,10 @@ index 56d962c1f..db11fdce1 100644
          *self
              .tool_namespaces_info
 diff --git a/codex-rs/core/tests/suite/compact_remote.rs b/codex-rs/core/tests/suite/compact_remote.rs
-index dd905d4f6..b849f5d64 100644
+index 7de3e92..c58be96 100644
 --- a/codex-rs/core/tests/suite/compact_remote.rs
 +++ b/codex-rs/core/tests/suite/compact_remote.rs
-@@ -1661,7 +1661,7 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
+@@ -1667,7 +1667,7 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
                  AgentPath::root().join("child").expect("valid child path"),
                  AgentPath::root(),
                  Vec::new(),
@@ -3585,10 +3618,10 @@ index dd905d4f6..b849f5d64 100644
              ),
              start_options: Default::default(),
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 4adf018bc..38e04d303 100644
+index d41fabb..e6d21f2 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
-@@ -2383,7 +2383,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
+@@ -2425,7 +2425,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
          ),
      };
      let notification = format!(
@@ -3598,10 +3631,10 @@ index 4adf018bc..38e04d303 100644
      // If the child is still running when the parent turn starts, wait_agent blocks
      // until mailbox delivery. The follow-up request must then contain that delivery.
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index fdeae5c6f..06334aca0 100644
+index 5b52060..4a19dc7 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -153,6 +153,8 @@ pub enum Feature {
+@@ -155,6 +155,8 @@ pub enum Feature {
      WebSearchCached,
      /// Expose the extension-backed standalone web search tool.
      StandaloneWebSearch,
@@ -3610,7 +3643,7 @@ index fdeae5c6f..06334aca0 100644
      /// Use the legacy Landlock Linux sandbox fallback instead of the default
      /// bubblewrap pipeline.
      UseLegacyLandlock,
-@@ -397,6 +399,25 @@ pub enum Feature {
+@@ -408,6 +410,25 @@ pub enum Feature {
      ResponsesWebsockets,
      /// Legacy rollout flag for Responses API WebSocket transport v2 experiments.
      ResponsesWebsocketsV2,
@@ -3636,7 +3669,7 @@ index fdeae5c6f..06334aca0 100644
  }
  
  impl Feature {
-@@ -1051,6 +1072,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1073,6 +1094,12 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::UnderDevelopment,
          default_enabled: false,
      },
@@ -3649,7 +3682,7 @@ index fdeae5c6f..06334aca0 100644
      FeatureSpec {
          id: Feature::SearchTool,
          key: "search_tool",
-@@ -1147,6 +1174,30 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1169,6 +1196,30 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -3681,7 +3714,7 @@ index fdeae5c6f..06334aca0 100644
          id: Feature::RequestPermissionsTool,
          key: "request_permissions_tool",
 diff --git a/codex-rs/models-manager/src/config.rs b/codex-rs/models-manager/src/config.rs
-index 6c32d548a..aff61ad4a 100644
+index 6c32d54..aff61ad 100644
 --- a/codex-rs/models-manager/src/config.rs
 +++ b/codex-rs/models-manager/src/config.rs
 @@ -7,6 +7,10 @@ pub struct ModelsManagerConfig {
@@ -3696,7 +3729,7 @@ index 6c32d548a..aff61ad4a 100644
      pub personality: Option<Personality>,
      pub model_catalog: Option<ModelsResponse>,
 diff --git a/codex-rs/models-manager/src/model_info.rs b/codex-rs/models-manager/src/model_info.rs
-index b79c67b2c..fb9f04f53 100644
+index ca10069..b94ca74 100644
 --- a/codex-rs/models-manager/src/model_info.rs
 +++ b/codex-rs/models-manager/src/model_info.rs
 @@ -66,6 +66,14 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
@@ -3715,7 +3748,7 @@ index b79c67b2c..fb9f04f53 100644
          if config.personality_enabled
              && config.personality == Some(Personality::None)
 diff --git a/codex-rs/models-manager/src/model_info_tests.rs b/codex-rs/models-manager/src/model_info_tests.rs
-index e57a5ab70..2e80d0c50 100644
+index e57a5ab..2e80d0c 100644
 --- a/codex-rs/models-manager/src/model_info_tests.rs
 +++ b/codex-rs/models-manager/src/model_info_tests.rs
 @@ -351,3 +351,58 @@ fn model_context_window_uses_model_value_without_override() {
@@ -3778,7 +3811,7 @@ index e57a5ab70..2e80d0c50 100644
 +    assert!(model.use_responses_lite);
 +}
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index ae2107b80..3eaeafce8 100644
+index 66e4315..f2ff8e9 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -1825,7 +1825,8 @@ pub enum AgentStatus {

@@ -2,8 +2,8 @@
 # Keep the live Boss prompts and owner-side role in sync with this checkout.
 #
 # The profile is rewritten as one atomic file after a timestamped backup. The
-# developer_instructions block is generated from main.md, and the two explicitly
-# managed worker prompt fields are copied from boss.config.example.toml. Every
+# developer_instructions block is generated from main.md, and the explicitly
+# managed multi-agent prompt fields are copied from boss.config.example.toml. Every
 # other TOML setting is copied through unchanged.
 set -euo pipefail
 
@@ -15,7 +15,7 @@ DEST="$CODEX_HOME/boss"
 PROFILE_FILE="$CODEX_HOME/${PROFILE}.config.toml"
 SOURCE_TEMPLATE="$REPO_ROOT/boss.config.example.toml"
 MANAGED_SECTION="features.multi_agent_v2"
-MANAGED_FIELDS=(multi_agent_mode_hint_text subagent_developer_instructions)
+MANAGED_FIELDS=(root_agent_usage_hint_text multi_agent_mode_hint_text subagent_developer_instructions)
 
 fail() { print -u2 "$SCRIPT_NAME: $1"; exit 1 }
 
@@ -82,10 +82,15 @@ for field in "${MANAGED_FIELDS[@]}"; do
     }
     {
       if (inside) {
-        print
         if ($0 ~ /^[[:space:]]*"""[[:space:]]*$/) {
+          print
           inside = 0
           complete = 1
+        } else {
+          if (table_header($0) || $0 ~ /^[[:space:]]*(root_agent_usage_hint_text|multi_agent_mode_hint_text|subagent_developer_instructions)[[:space:]]*=/) {
+            invalid = 1
+          }
+          print
         }
         next
       }
@@ -145,9 +150,10 @@ awk -v replacement="$WORK_DIR/developer-instructions.block" '
 ' "$PROFILE_FILE" > "$PROFILE_TMP" \
   || fail "profile does not contain exactly one complete developer_instructions block: $PROFILE_FILE"
 
-# Replace or insert only the two managed fields. The live profile may retain
+# Replace or insert only the managed fields. The live profile may retain
 # private settings and extra sections; they pass through this filter unchanged.
-awk -v mode_block="$WORK_DIR/multi_agent_mode_hint_text.block" \
+awk -v root_block="$WORK_DIR/root_agent_usage_hint_text.block" \
+    -v mode_block="$WORK_DIR/multi_agent_mode_hint_text.block" \
     -v worker_block="$WORK_DIR/subagent_developer_instructions.block" \
     -v target_section="$MANAGED_SECTION" '
   function load_block(path, name, line) {
@@ -178,6 +184,9 @@ awk -v mode_block="$WORK_DIR/multi_agent_mode_hint_text.block" \
   function field_open(field, line) {
     return line ~ ("^[[:space:]]*" field "[[:space:]]*=[[:space:]]*\\\"\\\"\\\"[[:space:]]*$")
   }
+  function managed_assignment(line) {
+    return line ~ /^[[:space:]]*(root_agent_usage_hint_text|multi_agent_mode_hint_text|subagent_developer_instructions)[[:space:]]*=/
+  }
   function out(line) {
     print line
     last_blank = (line ~ /^[[:space:]]*$/)
@@ -196,15 +205,21 @@ awk -v mode_block="$WORK_DIR/multi_agent_mode_hint_text.block" \
     }
   }
   BEGIN {
-    fields[1] = "multi_agent_mode_hint_text"
-    fields[2] = "subagent_developer_instructions"
-    field_count = 2
-    load_block(mode_block, fields[1])
-    load_block(worker_block, fields[2])
+    fields[1] = "root_agent_usage_hint_text"
+    fields[2] = "multi_agent_mode_hint_text"
+    fields[3] = "subagent_developer_instructions"
+    field_count = 3
+    load_block(root_block, fields[1])
+    load_block(mode_block, fields[2])
+    load_block(worker_block, fields[3])
   }
   {
     if (inside_field != "") {
-      if ($0 ~ /^[[:space:]]*"""[[:space:]]*$/) inside_field = ""
+      if ($0 ~ /^[[:space:]]*"""[[:space:]]*$/) {
+        inside_field = ""
+      } else if (table_header($0) || managed_assignment($0)) {
+        invalid = 1
+      }
       next
     }
 
@@ -293,5 +308,5 @@ mv -f "$PROFILE_TMP" "$PROFILE_FILE" \
 PROFILE_TMP=""
 
 print "$SCRIPT_NAME: synced $DEST/base.md and $DEST/main.md"
-print "$SCRIPT_NAME: updated developer_instructions, multi_agent_mode_hint_text, and subagent_developer_instructions in $PROFILE_FILE"
+print "$SCRIPT_NAME: updated developer_instructions, root_agent_usage_hint_text, multi_agent_mode_hint_text, and subagent_developer_instructions in $PROFILE_FILE"
 print "$SCRIPT_NAME: profile backup: $BACKUP"
