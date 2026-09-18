@@ -15,7 +15,7 @@ DEST="$CODEX_HOME/boss"
 PROFILE_FILE="$CODEX_HOME/${PROFILE}.config.toml"
 SOURCE_TEMPLATE="$REPO_ROOT/boss.config.example.toml"
 MANAGED_SECTION="features.multi_agent_v2"
-MANAGED_FIELDS=(root_agent_usage_hint_text multi_agent_mode_hint_text subagent_developer_instructions)
+MANAGED_FIELDS=(root_agent_usage_hint_text multi_agent_mode_hint_text subagent_developer_instructions subagent_usage_hint_text)
 
 fail() { print -u2 "$SCRIPT_NAME: $1"; exit 1 }
 
@@ -87,7 +87,7 @@ for field in "${MANAGED_FIELDS[@]}"; do
           inside = 0
           complete = 1
         } else {
-          if (table_header($0) || $0 ~ /^[[:space:]]*(root_agent_usage_hint_text|multi_agent_mode_hint_text|subagent_developer_instructions)[[:space:]]*=/) {
+          if (table_header($0) || $0 ~ /^[[:space:]]*(root_agent_usage_hint_text|multi_agent_mode_hint_text|subagent_developer_instructions|subagent_usage_hint_text)[[:space:]]*=/) {
             invalid = 1
           }
           print
@@ -155,6 +155,7 @@ awk -v replacement="$WORK_DIR/developer-instructions.block" '
 awk -v root_block="$WORK_DIR/root_agent_usage_hint_text.block" \
     -v mode_block="$WORK_DIR/multi_agent_mode_hint_text.block" \
     -v worker_block="$WORK_DIR/subagent_developer_instructions.block" \
+    -v usage_block="$WORK_DIR/subagent_usage_hint_text.block" \
     -v target_section="$MANAGED_SECTION" '
   function load_block(path, name, line) {
     while ((getline line < path) > 0) {
@@ -185,7 +186,7 @@ awk -v root_block="$WORK_DIR/root_agent_usage_hint_text.block" \
     return line ~ ("^[[:space:]]*" field "[[:space:]]*=[[:space:]]*\\\"\\\"\\\"[[:space:]]*$")
   }
   function managed_assignment(line) {
-    return line ~ /^[[:space:]]*(root_agent_usage_hint_text|multi_agent_mode_hint_text|subagent_developer_instructions)[[:space:]]*=/
+    return line ~ /^[[:space:]]*(root_agent_usage_hint_text|multi_agent_mode_hint_text|subagent_developer_instructions|subagent_usage_hint_text)[[:space:]]*=/
   }
   function out(line) {
     print line
@@ -208,10 +209,12 @@ awk -v root_block="$WORK_DIR/root_agent_usage_hint_text.block" \
     fields[1] = "root_agent_usage_hint_text"
     fields[2] = "multi_agent_mode_hint_text"
     fields[3] = "subagent_developer_instructions"
-    field_count = 3
+    fields[4] = "subagent_usage_hint_text"
+    field_count = 4
     load_block(root_block, fields[1])
     load_block(mode_block, fields[2])
     load_block(worker_block, fields[3])
+    load_block(usage_block, fields[4])
   }
   {
     if (inside_field != "") {
@@ -308,5 +311,5 @@ mv -f "$PROFILE_TMP" "$PROFILE_FILE" \
 PROFILE_TMP=""
 
 print "$SCRIPT_NAME: synced $DEST/base.md and $DEST/main.md"
-print "$SCRIPT_NAME: updated developer_instructions, root_agent_usage_hint_text, multi_agent_mode_hint_text, and subagent_developer_instructions in $PROFILE_FILE"
+print "$SCRIPT_NAME: updated developer_instructions, root_agent_usage_hint_text, multi_agent_mode_hint_text, subagent_developer_instructions, and subagent_usage_hint_text in $PROFILE_FILE"
 print "$SCRIPT_NAME: profile backup: $BACKUP"
