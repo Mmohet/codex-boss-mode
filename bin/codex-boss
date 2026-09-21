@@ -18,7 +18,11 @@ case "${1:-}" in
     ;;
   build)
     shift
-    exec "$PUBLIC_REPO/scripts/build.sh" "$@"
+    # Build scripts select the pinned rustup toolchain themselves. Clear
+    # inherited compiler overrides so a broken Homebrew rustc/wrapper cannot
+    # silently replace it.
+    exec env -u RUSTC_WRAPPER -u RUSTC -u RUSTDOC -u RUSTFMT \
+      "$PUBLIC_REPO/scripts/build.sh" "$@"
     ;;
 esac
 

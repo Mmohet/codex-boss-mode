@@ -120,6 +120,12 @@ for field in "${MANAGED_FIELDS[@]}"; do
     || fail "template does not contain exactly one complete $field block in [$MANAGED_SECTION]: $SOURCE_TEMPLATE"
 done
 
+MANAGED_TOOL_NAMESPACE="$(awk '
+  /^[[:space:]]*tool_namespace[[:space:]]*=/ { count++; line = $0 }
+  END { if (count != 1) exit 2; print line }
+' "$SOURCE_TEMPLATE")" \
+  || fail "template does not contain exactly one tool_namespace in [$MANAGED_SECTION]: $SOURCE_TEMPLATE"
+
 awk -v replacement="$WORK_DIR/developer-instructions.block" '
   BEGIN {
     while ((getline line < replacement) > 0) {
@@ -284,6 +290,33 @@ awk -v root_block="$WORK_DIR/root_agent_usage_hint_text.block" \
 mv -f "$WORK_DIR/profile-with-managed-prompts.toml" "$PROFILE_TMP" \
   || fail "could not stage managed prompt fields in $PROFILE_FILE"
 
+awk -v target_header="[$MANAGED_SECTION]" -v managed_line="$MANAGED_TOOL_NAMESPACE" '
+  {
+    if ($0 ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+      if (in_target && !seen) print managed_line
+      in_target = ($0 == target_header)
+      print
+      next
+    }
+    if (in_target && $0 ~ /^[[:space:]]*tool_namespace[[:space:]]*=/) {
+      count++
+      if (count > 1) invalid = 1
+      if (!seen) print managed_line
+      seen = 1
+      next
+    }
+    print
+  }
+  END {
+    if (in_target && !seen) print managed_line
+    if (invalid) exit 2
+  }
+' "$PROFILE_TMP" > "$WORK_DIR/profile-with-tool-namespace.toml" \
+  || fail "profile contains duplicate tool_namespace fields in [$MANAGED_SECTION]: $PROFILE_FILE"
+
+mv -f "$WORK_DIR/profile-with-tool-namespace.toml" "$PROFILE_TMP" \
+  || fail "could not stage tool_namespace in $PROFILE_FILE"
+
 PROFILE_MODE="$(stat -f '%Lp' "$PROFILE_FILE")" \
   || fail "could not read profile permissions: $PROFILE_FILE"
 chmod "$PROFILE_MODE" "$PROFILE_TMP" \
@@ -311,5 +344,5 @@ mv -f "$PROFILE_TMP" "$PROFILE_FILE" \
 PROFILE_TMP=""
 
 print "$SCRIPT_NAME: synced $DEST/base.md and $DEST/main.md"
-print "$SCRIPT_NAME: updated developer_instructions, root_agent_usage_hint_text, multi_agent_mode_hint_text, subagent_developer_instructions, and subagent_usage_hint_text in $PROFILE_FILE"
+print "$SCRIPT_NAME: updated developer_instructions, tool_namespace, root_agent_usage_hint_text, multi_agent_mode_hint_text, subagent_developer_instructions, and subagent_usage_hint_text in $PROFILE_FILE"
 print "$SCRIPT_NAME: profile backup: $BACKUP"

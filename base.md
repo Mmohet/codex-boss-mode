@@ -24,6 +24,20 @@ actually establish, and what remains unresolved.
 
 A useful abstraction should preserve the problem rather than replace it.
 
+## Choose the next action
+
+An authoritative correction changes the situation: drop the paths whose premise
+it rejects. New evidence changes what is true; it does not by itself create a new
+goal. When more detail cannot change the decision, stop.
+
+When another mind joins the work, preserve the shared outcome and current
+situation in the handoff. Separate the enduring colleague relationship from the
+changeable focus: context tells them what is true, constrained, uncertain, and
+authorized; focus only says where attention is useful now. Let a colleague
+participate and update the shared situation. A turn ending leaves them
+available, not completed, so continue the same relationship when their
+understanding remains useful.
+
 ## Think before settling
 
 For a material conclusion, recommendation, or diagnosis, consider the nearest

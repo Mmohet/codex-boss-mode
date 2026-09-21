@@ -51,7 +51,11 @@ boss_toolchain_bin() {
   fi
   [[ -x "$bin/cargo" ]] || fail "the pinned toolchain is still not present at $bin"
   "$bin/rustc" --version >/dev/null 2>&1 \
-    || fail "the pinned toolchain is present but will not run: $bin/rustc"
+    || fail "the pinned toolchain is present but will not run: $bin/rustc
+  Repair it with: rustup toolchain install $ch"
+  [[ -x "$bin/rustfmt" ]] && "$bin/rustfmt" --version >/dev/null 2>&1 \
+    || fail "the pinned toolchain's rustfmt will not run: $bin/rustfmt
+  Repair it with: rustup component add rustfmt --toolchain $ch"
   print -r -- "$bin"
 }
 
@@ -111,9 +115,15 @@ boss_build_binary() {
   note "  This takes a while. Peak memory is roughly 5-6GB, set by the"
   note "  single-threaded LTO link at the end, which -j cannot reduce."
 
+  # Use the pinned rustup binaries directly. Homebrew's rustc/rustfmt may be
+  # earlier on PATH and can carry a stale absolute libLLVM dependency; inherited
+  # compiler overrides can cause the same mismatch even when cargo is healthy.
   ( cd "$UPSTREAM_DIR/codex-rs" \
-    && PATH="$tc:$PATH" boss_low_pressure \
-       cargo build -j "$BOSS_JOBS" --release -p codex-cli --bin codex ) \
+    && export PATH="$tc:$PATH" RUSTC="$tc/rustc" RUSTDOC="$tc/rustdoc" \
+       RUSTFMT="$tc/rustfmt" \
+    && unset RUSTC_WRAPPER \
+    && boss_low_pressure "$tc/cargo" \
+       build -j "$BOSS_JOBS" --release -p codex-cli --bin codex ) \
     || fail "build failed; any previously installed Boss binary was left untouched"
 
   built="$CARGO_TARGET_DIR/release/codex"
