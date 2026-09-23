@@ -1351,34 +1351,37 @@ index cdb51f2..83d5333 100644
   "anyhow",
   "assert_cmd",
 diff --git a/codex-rs/analytics/src/reducer.rs b/codex-rs/analytics/src/reducer.rs
-index da3452c..0c02910 100644
+index da3452c..d554d0a 100644
 --- a/codex-rs/analytics/src/reducer.rs
 +++ b/codex-rs/analytics/src/reducer.rs
-@@ -3427,6 +3427,7 @@ fn collab_agent_tool_name(tool: &CollabAgentTool) -> &'static str {
+@@ -3427,6 +3427,8 @@ fn collab_agent_tool_name(tool: &CollabAgentTool) -> &'static str {
          CollabAgentTool::SendMessage => "send_message",
          CollabAgentTool::FollowupTask => "followup_task",
          CollabAgentTool::InterruptAgent => "interrupt_agent",
 +        CollabAgentTool::CompactAgent => "compact_agent",
++        CollabAgentTool::SetAgentEffort => "set_agent_effort",
          CollabAgentTool::ListAgents => "list_agents",
      }
  }
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/item.rs b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
-index 06f1bc7..431da2c 100644
+index 06f1bc7..b0d4471 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/item.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
-@@ -1126,6 +1126,7 @@ pub enum CollabAgentTool {
+@@ -1126,6 +1126,8 @@ pub enum CollabAgentTool {
      SendMessage,
      FollowupTask,
      InterruptAgent,
 +    CompactAgent,
++    SetAgentEffort,
      ListAgents,
  }
  
-@@ -1233,6 +1234,7 @@ impl From<CoreCollabAgentTool> for CollabAgentTool {
+@@ -1233,6 +1235,8 @@ impl From<CoreCollabAgentTool> for CollabAgentTool {
              CoreCollabAgentTool::SendMessage => Self::SendMessage,
              CoreCollabAgentTool::FollowupTask => Self::FollowupTask,
              CoreCollabAgentTool::InterruptAgent => Self::InterruptAgent,
 +            CoreCollabAgentTool::CompactAgent => Self::CompactAgent,
++            CoreCollabAgentTool::SetAgentEffort => Self::SetAgentEffort,
              CoreCollabAgentTool::ListAgents => Self::ListAgents,
          }
      }
@@ -1580,10 +1583,18 @@ index 1493378..0a174fa 100644
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 33bd450..22f0216 100644
+index 33bd450..3367f94 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -57,6 +57,7 @@ use codex_protocol::turn_input::CyberAccessProgram;
+@@ -32,6 +32,7 @@ use codex_history::RolloutItem;
+ use codex_protocol::AgentPath;
+ use codex_protocol::SessionId;
+ use codex_protocol::ThreadId;
++use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result as CodexResult;
+@@ -57,6 +58,7 @@ use codex_protocol::turn_input::CyberAccessProgram;
  use codex_protocol::user_input::UserInput;
  use codex_thread_store::LoadThreadHistoryParams;
  use codex_thread_store::ReadThreadParams;
@@ -1591,21 +1602,25 @@ index 33bd450..22f0216 100644
  use serde::Serialize;
  use std::collections::HashMap;
  use std::collections::HashSet;
-@@ -72,10 +73,13 @@ pub(crate) use self::delivery::MessageDeliveryError;
+@@ -72,11 +74,17 @@ pub(crate) use self::delivery::MessageDeliveryError;
  pub(crate) use self::delivery::MessageDeliveryMode;
  pub(crate) use self::execution::AgentExecutionGuard;
  use self::execution::AgentExecutionLimiter;
 +pub(crate) use self::compact::AgentCompactError;
 +pub(crate) use self::compact::AgentCompactOutcome;
++pub(crate) use self::effort::AgentEffortError;
++pub(crate) use self::effort::AgentEffortOutcome;
  pub(crate) use self::interrupt::AgentInterruptError;
  pub(crate) use self::interrupt::AgentInterruptOutcome;
  use self::residency::V2Residency;
  
 +mod compact;
  mod delivery;
++mod effort;
  mod execution;
  mod interrupt;
-@@ -118,7 +122,82 @@ pub(crate) struct LiveAgent {
+ mod legacy;
+@@ -118,7 +126,88 @@ pub(crate) struct LiveAgent {
  #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
  pub(crate) struct ListedAgent {
      pub(crate) agent_name: String,
@@ -1621,6 +1636,10 @@ index 33bd450..22f0216 100644
 +    /// not yet recorded a turn.
 +    #[serde(skip_serializing_if = "Option::is_none")]
 +    pub(crate) context_used_percent: Option<u8>,
++    /// The level this colleague is sampling at now, so a retune is judged
++    /// against what it is actually running at rather than what it was spawned at.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 +}
 +
 +/// What a colleague has become, and what it has been doing, in two cheap numbers.
@@ -1635,6 +1654,8 @@ index 33bd450..22f0216 100644
 +pub(crate) struct ColleagueActivity {
 +    pub(crate) colleague: String,
 +    pub(crate) context_used_percent: u8,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 +    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
 +    pub(crate) since_last_look: crate::tools::ToolCallCounts,
 +}
@@ -1689,7 +1710,7 @@ index 33bd450..22f0216 100644
  }
  
  /// Control-plane handle for multi-agent operations.
-@@ -502,49 +581,50 @@ impl AgentControl {
+@@ -502,49 +591,50 @@ impl AgentControl {
                          .as_ref()
                          .map(|path| path.name().to_string())
                          .unwrap_or_else(|| thread_id.to_string());
@@ -1771,7 +1792,7 @@ index 33bd450..22f0216 100644
              let line_bytes = "    \n".len() + line.len();
              if rendered_bytes + line_bytes <= MAX_ENVIRONMENT_SUBAGENT_BYTES {
                  rendered_bytes += line_bytes;
-@@ -585,16 +665,39 @@ impl AgentControl {
+@@ -585,16 +675,40 @@ impl AgentControl {
          });
  
          let root_path = AgentPath::root();
@@ -1810,10 +1831,11 @@ index 33bd450..22f0216 100644
 +                agent_availability: AgentAvailability::from_status(&status),
 +                agent_status: Some(status),
 +                context_used_percent: context_used_percent(&root_thread).await,
++                reasoning_effort: root_thread.session.live_reasoning_effort().await,
              });
          }
  
-@@ -608,24 +711,91 @@ impl AgentControl {
+@@ -608,24 +722,94 @@ impl AgentControl {
              {
                  continue;
              }
@@ -1836,6 +1858,7 @@ index 33bd450..22f0216 100644
 +                    agent_status: Some(status.clone()),
 +                    agent_availability: AgentAvailability::from_status(&status),
 +                    context_used_percent: context_used_percent(&thread).await,
++                    reasoning_effort: thread.session.live_reasoning_effort().await,
 +                });
 +            } else {
 +                // Registry metadata survives residency eviction. There is no loaded runtime
@@ -1846,6 +1869,7 @@ index 33bd450..22f0216 100644
 +                    agent_status: None,
 +                    agent_availability: AgentAvailability::Unloaded,
 +                    context_used_percent: None,
++                    reasoning_effort: None,
 +                });
 +            }
 +        }
@@ -1893,6 +1917,7 @@ index 33bd450..22f0216 100644
 +            loads.push(ColleagueActivity {
 +                colleague: name,
 +                context_used_percent: percent,
++                reasoning_effort: thread.session.live_reasoning_effort().await,
 +                since_last_look,
              });
          }
@@ -1911,7 +1936,7 @@ index 33bd450..22f0216 100644
      /// Starts a detached watcher for sub-agents spawned from another thread.
      ///
      /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and
-@@ -833,10 +1003,45 @@ impl AgentControl {
+@@ -833,10 +1017,45 @@ impl AgentControl {
          &self,
          parent_thread_id: ThreadId,
      ) -> CodexResult<Vec<(ThreadId, AgentMetadata)>> {
@@ -1961,7 +1986,7 @@ index 33bd450..22f0216 100644
      }
  
      async fn live_thread_spawn_children(
-@@ -909,6 +1114,20 @@ impl AgentControl {
+@@ -909,6 +1128,20 @@ impl AgentControl {
          &self,
          root_thread_id: ThreadId,
      ) -> CodexResult<Vec<ThreadId>> {
@@ -2083,7 +2108,7 @@ index 0000000..a443ce5
 +    }
 +}
 diff --git a/codex-rs/core/src/agent/control/delivery.rs b/codex-rs/core/src/agent/control/delivery.rs
-index 034fa0a..8a39461 100644
+index 034fa0a..83dae9d 100644
 --- a/codex-rs/core/src/agent/control/delivery.rs
 +++ b/codex-rs/core/src/agent/control/delivery.rs
 @@ -1,6 +1,6 @@
@@ -2094,7 +2119,12 @@ index 034fa0a..8a39461 100644
  
  use super::AgentControl;
  use crate::TurnStartOptions;
-@@ -18,14 +18,27 @@ use codex_protocol::protocol::InterAgentCommunication;
+@@ -14,18 +14,32 @@ use crate::session::turn_context::TurnContext;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ThreadId;
+ use codex_protocol::error::CodexErr;
++use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::InterAgentCommunication;
  
  #[derive(Clone, Copy, PartialEq, Eq)]
  pub(crate) enum MessageDeliveryMode {
@@ -2123,7 +2153,7 @@ index 034fa0a..8a39461 100644
  }
  
  impl AgentMessage {
-@@ -35,7 +48,7 @@ impl AgentMessage {
+@@ -35,7 +49,7 @@ impl AgentMessage {
          recipient: AgentPath,
          mode: MessageDeliveryMode,
      ) -> InterAgentCommunication {
@@ -2132,7 +2162,7 @@ index 034fa0a..8a39461 100644
          match self {
              Self::Encrypted(message) => InterAgentCommunication::new_encrypted(
                  author,
-@@ -44,9 +57,23 @@ impl AgentMessage {
+@@ -44,9 +58,23 @@ impl AgentMessage {
                  message,
                  trigger_turn,
              ),
@@ -2157,7 +2187,35 @@ index 034fa0a..8a39461 100644
                      MessageDeliveryMode::TriggerTurn => InterAgentMessageType::NewTask,
                  };
                  let content = InterAgentMessage::new(
-@@ -111,7 +138,7 @@ impl AgentControl {
+@@ -81,6 +109,7 @@ impl AgentControl {
+         target: ThreadId,
+         message: AgentMessage,
+         mode: MessageDeliveryMode,
++        effort: Option<ReasoningEffort>,
+     ) -> Result<AgentPath, MessageDeliveryError> {
+         let receiver_agent = self
+             .ensure_agent_known(target)
+@@ -105,13 +134,27 @@ impl AgentControl {
+         self.ensure_v2_agent_loaded(resume_config, target, /*parent*/ None)
+             .await
+             .map_err(MessageDeliveryError::Agent)?;
++        // Retune before the message lands so the step that reads it already
++        // runs at the new level, whether it starts a turn or joins one.
++        if let Some(effort) = effort {
++            let thread = self
++                .upgrade()
++                .map_err(MessageDeliveryError::Agent)?
++                .get_thread(target)
++                .await
++                .map_err(MessageDeliveryError::Agent)?;
++            thread
++                .session
++                .retune_effort(effort, /*future_turns*/ true)
++                .await;
++        }
+         let author = turn
+             .session_source
+             .get_agent_path()
              .unwrap_or_else(AgentPath::root);
          let communication = message.into_communication(author, receiver_agent_path.clone(), mode);
          let kind = match mode {
@@ -2166,6 +2224,92 @@ index 034fa0a..8a39461 100644
              MessageDeliveryMode::TriggerTurn => AgentCommunicationKind::Followup,
          };
          let context = AgentCommunicationContext::new(kind, caller);
+diff --git a/codex-rs/core/src/agent/control/effort.rs b/codex-rs/core/src/agent/control/effort.rs
+new file mode 100644
+index 0000000..727a4b0
+--- /dev/null
++++ b/codex-rs/core/src/agent/control/effort.rs
+@@ -0,0 +1,80 @@
++//! Moves a spawned colleague's reasoning effort after it has started.
++//!
++//! Effort used to be fixed at spawn because changing it later made the provider
++//! re-read the whole context at full price. GPT-6 caches across effort levels,
++//! so a long-lived colleague can be run at the level each stretch of work needs
++//! instead of the level its first assignment needed.
++//!
++//! Root and self targets are rejected, matching interruption and compaction.
++//! An unloaded runtime is an error rather than a reload: a follow-up carries
++//! its own effort and loads the colleague on the way.
++
++use super::AgentControl;
++use codex_protocol::AgentPath;
++use codex_protocol::ThreadId;
++use codex_protocol::error::CodexErr;
++use codex_protocol::openai_models::ReasoningEffort;
++use codex_protocol::protocol::TurnSettingsUpdateOutcome;
++
++pub(crate) struct AgentEffortOutcome {
++    pub(crate) agent_path: AgentPath,
++    pub(crate) previous_effort: Option<ReasoningEffort>,
++    /// Whether a turn already under way took the new level for its remaining steps.
++    pub(crate) running_turn: TurnSettingsUpdateOutcome,
++}
++
++/// Keeps request validation distinct from runtime failures for the tool adapter's error mapping.
++#[derive(Debug)]
++pub(crate) enum AgentEffortError {
++    InvalidRequest(String),
++    Agent(CodexErr),
++}
++
++impl AgentControl {
++    /// Sets the level a colleague's later turns start at and, when it is
++    /// mid-turn, the level for the rest of that turn.
++    pub(crate) async fn set_spawned_agent_effort(
++        &self,
++        caller: ThreadId,
++        target: ThreadId,
++        effort: ReasoningEffort,
++    ) -> Result<AgentEffortOutcome, AgentEffortError> {
++        let receiver_agent = self
++            .ensure_agent_known(target)
++            .map_err(AgentEffortError::Agent)?;
++        if receiver_agent
++            .agent_path
++            .as_ref()
++            .is_some_and(AgentPath::is_root)
++        {
++            return Err(AgentEffortError::InvalidRequest(
++                "root is not a spawned agent".to_string(),
++            ));
++        }
++        if target == caller {
++            return Err(AgentEffortError::InvalidRequest(
++                "use set_reasoning_effort to change your own effort".to_string(),
++            ));
++        }
++        let agent_path = receiver_agent.agent_path.clone().ok_or_else(|| {
++            AgentEffortError::InvalidRequest("target agent is missing an agent_path".to_string())
++        })?;
++        let state = self.upgrade().map_err(AgentEffortError::Agent)?;
++        let thread = state.get_thread(target).await.map_err(|_| {
++            AgentEffortError::InvalidRequest(
++                "this colleague is not loaded; pass reasoning_effort on followup_task instead"
++                    .to_string(),
++            )
++        })?;
++        let previous_effort = thread.session.thread_settings_snapshot().await.reasoning_effort;
++        let running_turn = thread
++            .session
++            .retune_effort(effort, /*future_turns*/ true)
++            .await;
++        Ok(AgentEffortOutcome {
++            agent_path,
++            previous_effort,
++            running_turn,
++        })
++    }
++}
 diff --git a/codex-rs/core/src/agent/control/legacy.rs b/codex-rs/core/src/agent/control/legacy.rs
 index f6bff6c..ceb3e57 100644
 --- a/codex-rs/core/src/agent/control/legacy.rs
@@ -2313,10 +2457,39 @@ index 9b3c7a2..eb63a4d 100644
          &action,
          step_context.settings.approval_policy(),
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index d4e1adf..6290ffb 100644
+index d4e1adf..eeb0fee 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -13111,3 +13111,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
+@@ -11834,7 +11834,7 @@ max_concurrent_threads_per_session = 17
+     .expect("multi-agent v2 config should parse");
+ 
+     let config = resolve_multi_agent_v2_config(&config_toml);
+-    let concurrency_guidance = "There are 17 available concurrency slots, meaning that up to 17 agents can be active at once, including you.";
++    let concurrency_guidance = "There are 17 available concurrency slots, meaning that up to 17 colleagues can be active at once, including you.";
+     assert!(config.wait_agent_enabled);
+     for wait_agent_enabled in [true, false] {
+         let mut config = config.clone();
+@@ -11846,7 +11846,7 @@ max_concurrent_threads_per_session = 17
+             let hint = hint.expect("default usage hints should be present").body();
+             assert!(hint.contains(concurrency_guidance));
+             assert_eq!(
+-                hint.contains("When calling `wait_agent`, prefer longer waits"),
++                hint.contains("`wait_agent` returns the moment a colleague has something for you"),
+                 wait_agent_enabled
+             );
+         }
+@@ -11936,9 +11936,8 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+             .strip_prefix(hint_without_model_overrides.as_str())
+             .expect("model-override guidance should extend the base usage hint");
+         for required_fragment in [
+-            "Full-history forks",
++            "full-history fork",
+             "`fork_turns`",
+-            "`model`",
+             "`reasoning_effort`",
+         ] {
+             assert!(
+@@ -13111,3 +13110,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
  
      Ok(())
  }
@@ -3383,6 +3556,151 @@ index 97e067c..29c359a 100644
                  turn_environments: Arc::clone(&turn_environments),
              };
              let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
+diff --git a/codex-rs/core/src/session/step_activation.rs b/codex-rs/core/src/session/step_activation.rs
+index 9a4e461..53b565c 100644
+--- a/codex-rs/core/src/session/step_activation.rs
++++ b/codex-rs/core/src/session/step_activation.rs
+@@ -16,6 +16,8 @@ use codex_protocol::openai_models::GuardianV2ModelConfig;
+ use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
+ use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
+ use codex_protocol::openai_models::ModelInfo;
++use codex_protocol::openai_models::ReasoningEffort;
++use codex_protocol::protocol::ThreadSettingsOverrides;
+ use codex_protocol::protocol::TurnSettingsUpdate;
+ use codex_protocol::protocol::TurnSettingsUpdateOutcome;
+ use std::sync::Arc;
+@@ -223,6 +225,64 @@ fn check_legacy_model_safety(
+ }
+ 
+ impl Session {
++    /// Moves this thread's reasoning effort, for the multi-agent tools.
++    ///
++    /// The live turn, if there is one, takes the new level from its next step.
++    /// With `future_turns` the level later turns start at moves too; without it
++    /// the change ends with the live turn. The provider no longer ties its cache
++    /// to the effort level, so either move keeps everything already cached.
++    pub(crate) async fn retune_effort(
++        self: &Arc<Self>,
++        effort: ReasoningEffort,
++        future_turns: bool,
++    ) -> TurnSettingsUpdateOutcome {
++        if future_turns {
++            super::thread_settings::update(
++                self,
++                "retune_effort".to_string(),
++                ThreadSettingsOverrides {
++                    effort: Some(Some(effort.clone())),
++                    ..Default::default()
++                },
++            )
++            .await;
++        }
++        let live_turn_id = {
++            let active = self.active_turn.lock().await;
++            active
++                .as_ref()
++                .and_then(|active| active.task.as_ref())
++                .map(|task| task.turn_context.sub_id.clone())
++        };
++        let Some(live_turn_id) = live_turn_id else {
++            return TurnSettingsUpdateOutcome::TargetUnavailable;
++        };
++        self.apply_turn_settings(
++            &live_turn_id,
++            TurnSettingsUpdate {
++                effort: Some(Some(effort)),
++                ..Default::default()
++            },
++        )
++        .await
++    }
++
++    /// The level this thread is sampling at now: the live turn's, including a
++    /// retune, or the level the next turn will start at when none is running.
++    pub(crate) async fn live_reasoning_effort(&self) -> Option<ReasoningEffort> {
++        let live = {
++            let active = self.active_turn.lock().await;
++            active
++                .as_ref()
++                .and_then(|active| active.task.as_ref())
++                .map(|task| task.turn_context.current_reasoning_effort())
++        };
++        match live {
++            Some(effort) => effort,
++            None => self.thread_settings_snapshot().await.reasoning_effort,
++        }
++    }
++
+     /// Publishes settings to the named, originally captured live task, regardless
+     /// of task kind. Publication does not propagate to child sessions or require
+     /// the task to sample; consumers using initial settings remain unchanged.
+diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
+index 864886a..f5990ce 100644
+--- a/codex-rs/core/src/session/step_activation_tests.rs
++++ b/codex-rs/core/src/session/step_activation_tests.rs
+@@ -1446,3 +1446,62 @@ async fn guardian_v2_empty_model_defaults_are_equivalent() {
+         );
+     }
+ }
++
++#[tokio::test]
++async fn retune_effort_moves_the_live_turn_and_only_optionally_later_turns() {
++    let ActivationFixture {
++        session, turn, finish, ..
++    } = activation_fixture(activation_models()).await;
++
++    // A colleague's own retune: the rest of this turn only.
++    assert_eq!(
++        session
++            .retune_effort(ReasoningEffort::High, /*future_turns*/ false)
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    assert_eq!(turn.current_reasoning_effort(), Some(ReasoningEffort::High));
++    assert_eq!(
++        session.live_reasoning_effort().await,
++        Some(ReasoningEffort::High)
++    );
++    assert_eq!(
++        session.thread_settings_snapshot().await.reasoning_effort,
++        Some(ReasoningEffort::Low)
++    );
++
++    // The parent's retune: this turn and the level later turns start at.
++    assert_eq!(
++        session
++            .retune_effort(ReasoningEffort::Medium, /*future_turns*/ true)
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    assert_eq!(turn.current_reasoning_effort(), Some(ReasoningEffort::Medium));
++    assert_eq!(
++        session.thread_settings_snapshot().await.reasoning_effort,
++        Some(ReasoningEffort::Medium)
++    );
++
++    let done = {
++        let active = session.active_turn.lock().await;
++        Arc::clone(&active.as_ref().unwrap().task.as_ref().unwrap().done)
++    };
++    let completed = done.notified();
++    finish.notify_one();
++    timeout(Duration::from_secs(/*secs*/ 10), completed)
++        .await
++        .expect("task completed");
++
++    // With no turn running, only the later-turn level can move.
++    assert_eq!(
++        session
++            .retune_effort(ReasoningEffort::High, /*future_turns*/ true)
++            .await,
++        TurnSettingsUpdateOutcome::TargetUnavailable
++    );
++    assert_eq!(
++        session.live_reasoning_effort().await,
++        Some(ReasoningEffort::High)
++    );
++}
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
 index c915037..805b5ab 100644
 --- a/codex-rs/core/src/session/step_settings.rs
@@ -3414,7 +3732,7 @@ index c915037..805b5ab 100644
              // The models manager already owns its catalog.
              model_catalog: None,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 745756d..ba23f13 100644
+index 745756d..b4b13e4 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -13,6 +13,7 @@ use crate::agents_md_manager::SessionInstructions;
@@ -3550,7 +3868,25 @@ index 745756d..ba23f13 100644
  #[tokio::test]
  async fn reload_user_config_layer_updates_effective_apps_config() {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -11861,6 +11980,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -6050,6 +6169,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+     .expect("initialize test hooks");
+     let services = SessionServices {
+         mcp_runtime,
++        tool_call_tally: Default::default(),
++        tool_call_tally_baseline: Default::default(),
+         mcp_handler_cache: Default::default(),
+         unified_exec_manager: UnifiedExecProcessManager::new(
+             config.background_terminal_max_timeout,
+@@ -8236,6 +8357,8 @@ where
+     .expect("initialize test hooks");
+     let services = SessionServices {
+         mcp_runtime,
++        tool_call_tally: Default::default(),
++        tool_call_tally_baseline: Default::default(),
+         mcp_handler_cache: Default::default(),
+         unified_exec_manager: UnifiedExecProcessManager::new(
+             config.background_terminal_max_timeout,
+@@ -11861,6 +11984,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
          turn_store: Arc::new(codex_extension_api::ExtensionData::new(tc.sub_id.clone())),
          tool_runtime: test_tool_runtime(Arc::clone(&sess), Arc::clone(&tc)),
          cancellation_token: CancellationToken::new(),
@@ -3623,7 +3959,7 @@ index 1f80548..6e69b2c 100644
  
                  let preempt_for_mailbox_mail = match &item {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e5a21b6..a9ef55f 100644
+index e5a21b6..154f2b6 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -21,6 +21,8 @@ use codex_protocol::SessionId;
@@ -3664,6 +4000,18 @@ index e5a21b6..a9ef55f 100644
      /// Sandbox context for this environment, including any additional permission grants.
      pub(crate) fn sandbox_context(
          &self,
+@@ -346,6 +370,11 @@ impl TurnContext {
+         Arc::clone(&self.current_settings.load().model_info)
+     }
+ 
++    /// The effort later steps of this turn will sample at, including any live retune.
++    pub(crate) fn current_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
++        self.current_settings.load().reasoning_effort().cloned()
++    }
++
+     /// Legacy: returns the frozen initial-turn model metadata.
+     /// Step-scoped consumers should use their captured `StepContext::settings`.
+     pub(crate) fn model_info(&self) -> &Arc<ModelInfo> {
 diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
 index 74b1def..bfc83ea 100644
 --- a/codex-rs/core/src/session/world_state.rs
@@ -4121,7 +4469,7 @@ index 715a02b..8cc9ea6 100644
 +    )
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
-index 4361161..e48d874 100644
+index 4361161..bbdf111 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 @@ -91,7 +91,15 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
@@ -4197,7 +4545,7 @@ index 4361161..e48d874 100644
              .to_string(),
          strict: false,
          defer_loading: None,
-@@ -215,14 +222,19 @@ pub fn create_followup_task_tool() -> ToolSpec {
+@@ -215,22 +222,37 @@ pub fn create_followup_task_tool() -> ToolSpec {
          (
              "target".to_string(),
              JsonSchema::string(Some(
@@ -4219,7 +4567,17 @@ index 4361161..e48d874 100644
              ))
              .with_encrypted(),
          ),
-@@ -230,7 +242,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
++        (
++            "reasoning_effort".to_string(),
++            JsonSchema::string(Some(
++                "The colleague's effort from here on. Every follow-up is the moment to \
++                 set it again: match what this next stretch asks for, not what the \
++                 colleague was first invited for. Omit to keep its current level; \
++                 changing it keeps the colleague's cache."
++                    .to_string(),
++            )),
++        ),
+     ]);
  
      ToolSpec::Function(ResponsesApiTool {
          name: "followup_task".to_string(),
@@ -4228,7 +4586,7 @@ index 4361161..e48d874 100644
              .to_string(),
          strict: false,
          defer_loading: None,
-@@ -280,7 +292,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
+@@ -280,7 +302,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
  pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
      ToolSpec::Function(ResponsesApiTool {
          name: "wait_agent".to_string(),
@@ -4237,7 +4595,7 @@ index 4361161..e48d874 100644
              .to_string(),
          strict: false,
          defer_loading: None,
-@@ -293,7 +305,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
+@@ -293,7 +315,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
      let properties = BTreeMap::from([(
          "path_prefix".to_string(),
          JsonSchema::string(Some(
@@ -4246,7 +4604,7 @@ index 4361161..e48d874 100644
                  .to_string(),
          )),
      )]);
-@@ -301,7 +313,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
+@@ -301,7 +323,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
      ToolSpec::Function(ResponsesApiTool {
          name: "list_agents".to_string(),
          description:
@@ -4255,7 +4613,7 @@ index 4361161..e48d874 100644
                  .to_string(),
          strict: false,
          defer_loading: None,
-@@ -339,13 +351,13 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
+@@ -339,13 +361,13 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
      let properties = BTreeMap::from([(
          "target".to_string(),
          JsonSchema::string(Some(
@@ -4271,7 +4629,7 @@ index 4361161..e48d874 100644
          strict: false,
          defer_loading: None,
          parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
-@@ -358,6 +370,29 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
+@@ -358,6 +380,77 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
      })
  }
  
@@ -4298,10 +4656,58 @@ index 4361161..e48d874 100644
 +    })
 +}
 +
++pub fn create_set_agent_effort_tool() -> ToolSpec {
++    let properties = BTreeMap::from([
++        (
++            "target".to_string(),
++            JsonSchema::string(Some(
++                "Agent id or stable colleague role from spawn_agent.".to_string(),
++            )),
++        ),
++        (
++            "reasoning_effort".to_string(),
++            JsonSchema::string(Some("The new level.".to_string())),
++        ),
++    ]);
++
++    ToolSpec::Function(ResponsesApiTool {
++        name: "set_agent_effort".to_string(),
++        description: "Change a colleague's reasoning effort without sending new work. It takes effect from the colleague's next step, including in a turn already under way, and stays for later turns. Come back to it whenever `wait_agent` shows the work no longer matches the colleague's `reasoning_effort` — a long run of routine commands at a high level, or a colleague going round on something hard at a low one. Changing it keeps the colleague's cache.".to_string(),
++        strict: false,
++        defer_loading: None,
++        parameters: JsonSchema::object(
++            properties,
++            Some(vec!["target".to_string(), "reasoning_effort".to_string()]),
++            Some(false.into()),
++        ),
++        output_schema: None,
++    })
++}
++
++pub fn create_set_reasoning_effort_tool() -> ToolSpec {
++    let properties = BTreeMap::from([(
++        "reasoning_effort".to_string(),
++        JsonSchema::string(Some("The new level.".to_string())),
++    )]);
++
++    ToolSpec::Function(ResponsesApiTool {
++        name: "set_reasoning_effort".to_string(),
++        description: "Change your own reasoning effort for the rest of this turn. Come back to it whenever the step in front of you changes weight: raise it on reaching something that needs care — a subtle bug, a design choice, a result that does not add up — and lower it once what is left is routine. Your next turn starts again at the level you were given. Changing it keeps your cache.".to_string(),
++        strict: false,
++        defer_loading: None,
++        parameters: JsonSchema::object(
++            properties,
++            Some(vec!["reasoning_effort".to_string()]),
++            Some(false.into()),
++        ),
++        output_schema: None,
++    })
++}
++
  fn agent_status_output_schema() -> Value {
      json!({
          "oneOf": [
-@@ -412,12 +447,12 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
+@@ -412,12 +505,12 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
          return json!({
              "type": "object",
              "properties": {
@@ -4317,7 +4723,7 @@ index 4361161..e48d874 100644
              "additionalProperties": false
          });
      }
-@@ -425,16 +460,16 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
+@@ -425,16 +518,16 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
      json!({
          "type": "object",
          "properties": {
@@ -4337,7 +4743,7 @@ index 4361161..e48d874 100644
          "additionalProperties": false
      })
  }
-@@ -464,17 +499,22 @@ fn list_agents_output_schema() -> Value {
+@@ -464,17 +557,22 @@ fn list_agents_output_schema() -> Value {
                      "properties": {
                          "agent_name": {
                              "type": "string",
@@ -4365,7 +4771,7 @@ index 4361161..e48d874 100644
              }
          },
          "required": ["agents"],
-@@ -587,13 +627,26 @@ fn create_collab_input_items_schema() -> JsonSchema {
+@@ -587,13 +685,26 @@ fn create_collab_input_items_schema() -> JsonSchema {
  fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
      BTreeMap::from([
          (
@@ -4395,21 +4801,21 @@ index 4361161..e48d874 100644
          (
              "agent_type".to_string(),
              JsonSchema::string(Some(format!(
-@@ -626,12 +679,27 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
+@@ -626,12 +737,27 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
  fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
      BTreeMap::from([
          (
 -            "message".to_string(),
 +            "colleague_role".to_string(),
-+            JsonSchema::string(Some(
+             JsonSchema::string(Some(
+-                "Initial plain-text task for the new agent.".to_string(),
 +                "Persistent colleague relationship, domain, or context used to continue the same colleague. Do not name it after the current action, query, deliverable, or phase. Use lowercase letters, digits, and underscores."
 +                    .to_string(),
 +            )),
 +        ),
 +        (
 +            "shared_context".to_string(),
-             JsonSchema::string(Some(
--                "Initial plain-text task for the new agent.".to_string(),
++            JsonSchema::string(Some(
 +                "The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. This is context for participation, not a sealed assignment. Plain text."
 +                    .to_string(),
              ))
@@ -4425,7 +4831,7 @@ index 4361161..e48d874 100644
          (
              "agent_type".to_string(),
              JsonSchema::string(Some(format!(
-@@ -679,7 +747,7 @@ fn spawn_agent_tool_description(
+@@ -679,7 +805,7 @@ fn spawn_agent_tool_description(
      let tool_description = format!(
          r#"
          {agent_role_guidance}
@@ -4434,7 +4840,7 @@ index 4361161..e48d874 100644
      );
  
      if let Some(usage_hint_text) = usage_hint_text {
-@@ -703,34 +771,11 @@ Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructio
+@@ -703,34 +829,11 @@ Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructio
  Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn.
  {agent_role_usage_hint}
  
@@ -4474,7 +4880,7 @@ index 4361161..e48d874 100644
      )
  }
  
-@@ -745,13 +790,11 @@ fn spawn_agent_tool_description_v2(
+@@ -745,13 +848,11 @@ fn spawn_agent_tool_description_v2(
      let tool_description = format!(
          r#"
          {agent_role_guidance}
@@ -4672,7 +5078,7 @@ index 888a113..093e0e0 100644
              "pending_init",
              "running",
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 75b57df..466b5a6 100644
+index 75b57df..313f6e5 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -213,6 +213,7 @@ struct ListAgentsResult {
@@ -4854,7 +5260,87 @@ index 75b57df..466b5a6 100644
      assert_eq!(result.nickname, None);
      assert_eq!(success, Some(true));
  }
-@@ -3932,8 +3962,15 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+@@ -2940,6 +2970,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait completed.".to_string(),
+             timed_out: false,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -2987,6 +3018,7 @@ async fn multi_agent_v2_wait_agent_clamps_timeout_below_configured_min() {
+                 "Wait timed out.\n\nRequested timeout of 1ms was clamped to the minimum of 50ms."
+                     .to_string(),
+             timed_out: true,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3022,6 +3054,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min()
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait timed out.".to_string(),
+             timed_out: true,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3077,6 +3110,7 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait timed out.".to_string(),
+             timed_out: true,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3117,6 +3151,7 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait timed out.".to_string(),
+             timed_out: true,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3182,6 +3217,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max()
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait timed out.".to_string(),
+             timed_out: true,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3444,6 +3480,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait completed.".to_string(),
+             timed_out: false,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3528,6 +3565,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait completed.".to_string(),
+             timed_out: false,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3622,6 +3660,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait completed.".to_string(),
+             timed_out: false,
++            colleagues: Vec::new(),
+         }
+     );
+     assert_eq!(success, None);
+@@ -3713,6 +3752,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
+         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+             message: "Wait completed.".to_string(),
+             timed_out: false,
++            colleagues: Vec::new(),
+         }
+     );
+     assert!(!content.contains("sensitive child output"));
+@@ -3932,8 +3972,15 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
      let (content, _) = expect_text_output(output);
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
@@ -4871,7 +5357,7 @@ index 75b57df..466b5a6 100644
  }
  
  #[tokio::test]
-@@ -4515,6 +4552,39 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
+@@ -4515,6 +4562,39 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
      assert_eq!(config, expected);
  }
  
@@ -4912,22 +5398,25 @@ index 75b57df..466b5a6 100644
  async fn build_agent_resume_config_clears_base_instructions() {
      let (_session, mut turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
-index 40aecee..e54d5bd 100644
+index 40aecee..85aca62 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
-@@ -25,6 +25,7 @@ use serde::Deserialize;
+@@ -25,6 +25,9 @@ use serde::Deserialize;
  use serde::Serialize;
  use serde_json::Value as JsonValue;
  
 +pub(crate) use compact_agent::Handler as CompactAgentHandler;
++pub(crate) use effort::SetAgentEffortHandler;
++pub(crate) use effort::SetReasoningEffortHandler;
  pub(crate) use followup_task::Handler as FollowupTaskHandler;
  pub(crate) use interrupt_agent::Handler as InterruptAgentHandler;
  pub(crate) use list_agents::Handler as ListAgentsHandler;
-@@ -33,6 +34,7 @@ pub(crate) use spawn::Handler as SpawnAgentHandler;
+@@ -33,6 +36,8 @@ pub(crate) use spawn::Handler as SpawnAgentHandler;
  pub(crate) use wait::Handler as WaitAgentHandler;
  
  mod analytics;
 +mod compact_agent;
++mod effort;
  mod followup_task;
  mod interrupt_agent;
  mod list_agents;
@@ -5044,8 +5533,207 @@ index 0000000..484dd01
 +        tool_output_code_mode_result(self, "compact_agent")
 +    }
 +}
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs
+new file mode 100644
+index 0000000..313b090
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs
+@@ -0,0 +1,181 @@
++//! Reasoning-effort tools: the parent's `set_agent_effort` and a colleague's
++//! own `set_reasoning_effort`.
++//!
++//! Both exist because effort stopped being a spawn-time decision. The parent
++//! sees how a colleague's work is going from outside; the colleague notices
++//! from inside when the step in front of it got harder or easier. Neither
++//! change costs the colleague its cache.
++
++use super::analytics::ToolCallAnalytics;
++use super::*;
++use crate::agent::control::AgentEffortError;
++use crate::agent::control::AgentEffortOutcome;
++use crate::tools::handlers::multi_agents_spec::create_set_agent_effort_tool;
++use crate::tools::handlers::multi_agents_spec::create_set_reasoning_effort_tool;
++use codex_protocol::protocol::TurnSettingsUpdateOutcome;
++use codex_tools::ToolSpec;
++
++pub(crate) struct SetAgentEffortHandler;
++
++impl ToolExecutor<ToolInvocation> for SetAgentEffortHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("set_agent_effort")
++    }
++
++    fn spec(&self) -> ToolSpec {
++        create_set_agent_effort_tool()
++    }
++
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(async move {
++            let mut analytics =
++                ToolCallAnalytics::new(&invocation, CollabAgentTool::SetAgentEffort);
++            let result = handle_set_agent_effort(invocation, &mut analytics).await;
++            analytics.finish(&result);
++            result.map(boxed_tool_output)
++        })
++    }
++}
++
++impl CoreToolRuntime for SetAgentEffortHandler {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(payload, ToolPayload::Function { .. })
++    }
++}
++
++async fn handle_set_agent_effort(
++    invocation: ToolInvocation,
++    analytics: &mut ToolCallAnalytics,
++) -> Result<EffortResult, FunctionCallError> {
++    let ToolInvocation {
++        session,
++        turn,
++        payload,
++        call_id,
++        ..
++    } = invocation;
++    let arguments = function_arguments(payload)?;
++    let args: SetAgentEffortArgs = parse_arguments(&arguments)?;
++    let agent_id = resolve_agent_target(&session, &turn, &args.target).await?;
++    analytics.set_receiver(agent_id);
++    let AgentEffortOutcome {
++        agent_path,
++        previous_effort,
++        running_turn,
++    } = session
++        .services
++        .agent_control
++        .set_spawned_agent_effort(session.thread_id, agent_id, args.reasoning_effort)
++        .await
++        .map_err(|err| match err {
++            AgentEffortError::InvalidRequest(message) => FunctionCallError::RespondToModel(message),
++            AgentEffortError::Agent(err) => collab_agent_error(agent_id, err),
++        })?;
++    emit_sub_agent_activity(
++        &session,
++        &turn,
++        SubAgentActivityItem {
++            id: call_id,
++            agent_thread_id: agent_id,
++            agent_path,
++            kind: SubAgentActivityKind::Interacted,
++        },
++    )
++    .await;
++    Ok(EffortResult::new(previous_effort, running_turn))
++}
++
++pub(crate) struct SetReasoningEffortHandler;
++
++impl ToolExecutor<ToolInvocation> for SetReasoningEffortHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("set_reasoning_effort")
++    }
++
++    fn spec(&self) -> ToolSpec {
++        create_set_reasoning_effort_tool()
++    }
++
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(async move {
++            let arguments = function_arguments(invocation.payload.clone())?;
++            let args: SetReasoningEffortArgs = parse_arguments(&arguments)?;
++            let previous_effort = invocation.turn.current_reasoning_effort();
++            // Only the rest of this turn: the level the parent chose is where the
++            // next turn starts, so a raise for one hard spot does not stick.
++            let running_turn = invocation
++                .session
++                .retune_effort(args.reasoning_effort, /*future_turns*/ false)
++                .await;
++            Ok(boxed_tool_output(EffortResult::new(
++                previous_effort,
++                running_turn,
++            )))
++        })
++    }
++}
++
++impl CoreToolRuntime for SetReasoningEffortHandler {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(payload, ToolPayload::Function { .. })
++    }
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct SetAgentEffortArgs {
++    target: String,
++    reasoning_effort: ReasoningEffort,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct SetReasoningEffortArgs {
++    reasoning_effort: ReasoningEffort,
++}
++
++#[derive(Debug, Serialize)]
++pub(crate) struct EffortResult {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    previous_effort: Option<ReasoningEffort>,
++    /// `applied`, `no_turn_running`, or the reason the running turn refused.
++    running_turn: String,
++}
++
++impl EffortResult {
++    fn new(previous_effort: Option<ReasoningEffort>, running_turn: TurnSettingsUpdateOutcome) -> Self {
++        let running_turn = match running_turn {
++            TurnSettingsUpdateOutcome::Applied => "applied".to_string(),
++            TurnSettingsUpdateOutcome::TargetUnavailable => "no_turn_running".to_string(),
++            TurnSettingsUpdateOutcome::Rejected { reason } => format!("rejected: {reason}"),
++        };
++        Self {
++            previous_effort,
++            running_turn,
++        }
++    }
++}
++
++impl ToolOutput for EffortResult {
++    fn log_output(&self) -> String {
++        tool_output_json_text(self, "set_effort")
++    }
++
++    fn success_for_logging(&self) -> bool {
++        !self.running_turn.starts_with("rejected")
++    }
++
++    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
++        tool_output_response_item(call_id, payload, self, Some(true), "set_effort")
++    }
++
++    fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
++        tool_output_code_mode_result(self, "set_effort")
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs
+index 161e644..903da3e 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs
+@@ -43,6 +43,7 @@ impl Handler {
+             MessageDeliveryMode::TriggerTurn,
+             args.target,
+             args.message,
++            args.reasoning_effort,
+             analytics,
+         )
+         .await
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
-index e319a20..450078d 100644
+index e319a20..6b67f4b 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
 @@ -1,7 +1,8 @@
@@ -5059,11 +5747,36 @@ index e319a20..450078d 100644
  
  use super::analytics::ToolCallAnalytics;
  use super::*;
+@@ -23,6 +24,8 @@ pub(crate) struct SendMessageArgs {
+ pub(crate) struct FollowupTaskArgs {
+     pub(crate) target: String,
+     pub(crate) message: String,
++    #[serde(default)]
++    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+ }
+ 
+ pub(super) fn message_content(message: String) -> Result<String, FunctionCallError> {
+@@ -40,6 +43,7 @@ pub(super) async fn handle_message_string_tool(
+     mode: MessageDeliveryMode,
+     target: String,
+     message: String,
++    effort: Option<ReasoningEffort>,
+     analytics: &mut ToolCallAnalytics,
+ ) -> Result<FunctionToolOutput, FunctionCallError> {
+     let message = message_content(message)?;
+@@ -61,6 +65,7 @@ pub(super) async fn handle_message_string_tool(
+             receiver_thread_id,
+             agent_message_from_tool(message, &source),
+             mode,
++            effort,
+         )
+         .await
+         .map_err(|err| match err {
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
-index f198717..f0008d0 100644
+index f198717..991e0ab 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs
-@@ -40,7 +40,7 @@ impl Handler {
+@@ -40,9 +40,10 @@ impl Handler {
          let args: SendMessageArgs = parse_arguments(&arguments)?;
          handle_message_string_tool(
              invocation,
@@ -5071,7 +5784,10 @@ index f198717..f0008d0 100644
 +            MessageDeliveryMode::WakeIfIdle,
              args.target,
              args.message,
++            /*effort*/ None,
              analytics,
+         )
+         .await
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
 index d7899c7..d179d13 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
@@ -5181,7 +5897,7 @@ index d7899c7..d179d13 100644
  }
  
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
-index d2f92fe..b547520 100644
+index d2f92fe..c0c5bb8 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
 @@ -1,4 +1,5 @@
@@ -5216,7 +5932,7 @@ index d2f92fe..b547520 100644
 +    /// costing a separate `list_agents` round trip. Status is deliberately not
 +    /// here: measured over a full session, 32 of 33 expired waits had a
 +    /// colleague actively working, so a running/idle flag would be a constant.
-+    #[serde(skip_serializing_if = "Vec::is_empty")]
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
 +    pub(crate) colleagues: Vec<ColleagueActivity>,
  }
  
@@ -5726,7 +6442,7 @@ index 05a1e2e..8c787f0 100644
  }
  
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index ac1ca68..c2ed7b8 100644
+index ac1ca68..d30952b 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -4,6 +4,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -5737,15 +6453,17 @@ index ac1ca68..c2ed7b8 100644
  use crate::tools::code_mode::execute_spec::create_code_mode_tool;
  use crate::tools::context::ToolInvocation;
  use crate::tools::effective_tool_mode;
-@@ -45,6 +46,7 @@ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
+@@ -45,6 +46,9 @@ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
  use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
  use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
  use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 +use crate::tools::handlers::multi_agents_v2::CompactAgentHandler;
++use crate::tools::handlers::multi_agents_v2::SetAgentEffortHandler;
++use crate::tools::handlers::multi_agents_v2::SetReasoningEffortHandler;
  use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
  use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
  use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
-@@ -54,6 +56,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
+@@ -54,6 +58,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
  use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
  use crate::tools::hosted_spec::WebSearchToolOptions;
  use crate::tools::hosted_spec::create_web_search_tool;
@@ -5753,7 +6471,7 @@ index ac1ca68..c2ed7b8 100644
  use crate::tools::registry::CoreToolRuntime;
  #[cfg(test)]
  use crate::tools::registry::RegisteredTool;
-@@ -153,33 +156,42 @@ pub(crate) fn build_tool_router(
+@@ -153,33 +158,42 @@ pub(crate) fn build_tool_router(
      let mut registry = ToolRegistry::with_allowed_tools(session.allowed_tools.clone());
      add_core_tool_sources(&context, &mut registry);
  
@@ -5823,7 +6541,7 @@ index ac1ca68..c2ed7b8 100644
  
      finalize_tool_router(
          turn_context,
-@@ -304,8 +316,14 @@ pub(crate) fn append_source_tools(
+@@ -304,8 +318,14 @@ pub(crate) fn append_source_tools(
      >,
      dynamic_tools: &[DynamicToolSpec],
  ) -> Vec<ToolSpec> {
@@ -5840,7 +6558,7 @@ index ac1ca68..c2ed7b8 100644
      }
      let standalone_web_search_tool = append_extension_tool_executors(
          turn_context,
-@@ -313,7 +331,11 @@ pub(crate) fn append_source_tools(
+@@ -313,7 +333,11 @@ pub(crate) fn append_source_tools(
          extension_tool_executors,
          registry,
      );
@@ -5853,7 +6571,7 @@ index ac1ca68..c2ed7b8 100644
      hosted_model_tool_specs(
          turn_context,
          model_info,
-@@ -351,6 +373,7 @@ pub(crate) fn finalize_tool_router(
+@@ -351,6 +375,7 @@ pub(crate) fn finalize_tool_router(
      if let Some(allowed) = &registry.allowed_tools {
          hosted_specs.retain(|spec| allowed.contains(&ToolName::plain(spec.name())));
      }
@@ -5861,7 +6579,7 @@ index ac1ca68..c2ed7b8 100644
      apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
      let tool_mode = effective_tool_mode(turn_context, model_info);
      let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
-@@ -365,7 +388,8 @@ pub(crate) fn finalize_tool_router(
+@@ -365,7 +390,8 @@ pub(crate) fn finalize_tool_router(
          }
      }
      let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
@@ -5871,7 +6589,7 @@ index ac1ca68..c2ed7b8 100644
          && registry.entries().any(|tool| {
              tool.runtime.tool_name() != tool_search_name
                  && tool.exposure.is_deferred()
-@@ -522,6 +546,21 @@ fn apply_direct_model_only_namespace_overrides(
+@@ -522,6 +548,21 @@ fn apply_direct_model_only_namespace_overrides(
      }
  }
  
@@ -5893,7 +6611,7 @@ index ac1ca68..c2ed7b8 100644
  #[instrument(level = "trace", skip_all)]
  fn build_model_visible_specs(
      turn_context: &TurnContext,
-@@ -530,14 +569,39 @@ fn build_model_visible_specs(
+@@ -530,14 +571,39 @@ fn build_model_visible_specs(
      code_mode_tool_names: &BTreeMap<String, ToolName>,
      hosted_specs: Vec<ToolSpec>,
  ) -> Vec<ToolSpec> {
@@ -5935,7 +6653,7 @@ index ac1ca68..c2ed7b8 100644
          if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure) {
              continue;
          }
-@@ -552,7 +616,17 @@ fn build_model_visible_specs(
+@@ -552,7 +618,17 @@ fn build_model_visible_specs(
              spec,
          ));
      }
@@ -5954,7 +6672,7 @@ index ac1ca68..c2ed7b8 100644
  
      merge_into_namespaces(specs)
          .into_iter()
-@@ -562,6 +636,45 @@ fn build_model_visible_specs(
+@@ -562,6 +638,45 @@ fn build_model_visible_specs(
          .collect()
  }
  
@@ -6000,7 +6718,7 @@ index ac1ca68..c2ed7b8 100644
  fn spec_for_model_request(
      turn_context: &TurnContext,
      model_info: &ModelInfo,
-@@ -981,8 +1094,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+@@ -981,8 +1096,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
          return;
      }
  
@@ -6015,7 +6733,7 @@ index ac1ca68..c2ed7b8 100644
      add_core_utility_tools(context, registry);
      add_collaboration_tools(context, registry);
  }
-@@ -1044,8 +1161,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
+@@ -1044,8 +1163,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
      if is_guardian && !features.enabled(Feature::UnifiedExec) {
          return;
      }
@@ -6027,9 +6745,21 @@ index ac1ca68..c2ed7b8 100644
      let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
      let options = ExecCommandHandlerOptions {
          allow_login_shell,
-@@ -1097,11 +1215,15 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1096,12 +1216,27 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+     let features = turn_context.config.features.get();
      let environment_mode = tool_environment_mode(context.environments);
  
++    // A colleague's own effort. Root is left out: its level is the user's to set.
++    if turn_context.session_source.is_non_root_agent()
++        && features.enabled(Feature::StepModelSwitching)
++    {
++        registry.add_with_boss_capability(
++            SetReasoningEffortHandler,
++            ToolExposure::Direct,
++            BossMainToolCapability::Utility,
++        );
++    }
++
      if turn_context.config.update_plan_enabled {
 -        registry.add(PlanHandler);
 +        registry.add_with_boss_capability(
@@ -6045,7 +6775,7 @@ index ac1ca68..c2ed7b8 100644
              context
                  .wait_for_environment_tool_config
                  .map(Arc::as_ref)
-@@ -1109,15 +1231,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1109,15 +1244,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                      WaitForEnvironmentHandler::default,
                      WaitForEnvironmentHandler::new,
                  ),
@@ -6065,7 +6795,7 @@ index ac1ca68..c2ed7b8 100644
          );
      }
  
-@@ -1134,7 +1259,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1134,7 +1272,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                  )
              })
      {
@@ -6074,7 +6804,7 @@ index ac1ca68..c2ed7b8 100644
              RequestUserInputAsyncHandler {
                  description: context
                      .model_messages
-@@ -1143,6 +1268,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1143,6 +1281,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                      .and_then(|tool| tool.description.clone()),
              },
              ToolExposure::DirectModelOnly,
@@ -6082,7 +6812,7 @@ index ac1ca68..c2ed7b8 100644
          );
      }
  
-@@ -1157,13 +1283,24 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1157,13 +1296,24 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
      }
  
@@ -6110,7 +6840,7 @@ index ac1ca68..c2ed7b8 100644
      }
  
      let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);
-@@ -1173,7 +1310,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1173,7 +1323,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "clock");
      if current_time_reminder_enabled || model_has_clock {
@@ -6123,7 +6853,7 @@ index ac1ca68..c2ed7b8 100644
      }
      if features.enabled(Feature::SleepTool)
          && match turn_context.config.sleep_tool_mode {
-@@ -1191,7 +1332,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1191,7 +1345,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              }
          }
      {
@@ -6136,7 +6866,7 @@ index ac1ca68..c2ed7b8 100644
      }
  
      if tool_suggest_enabled(turn_context)
-@@ -1200,17 +1345,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1200,17 +1358,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              .filter(|candidates| !candidates.tools.is_empty())
      {
          if candidates.presentation == crate::tools::router::ToolSuggestPresentation::ListTool {
@@ -6170,7 +6900,7 @@ index ac1ca68..c2ed7b8 100644
          let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
          registry.add(ApplyPatchHandler::new(include_environment_id));
      }
-@@ -1221,21 +1374,29 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1221,21 +1387,29 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "test_sync_tool")
      {
@@ -6211,7 +6941,7 @@ index ac1ca68..c2ed7b8 100644
      }
  }
  
-@@ -1295,6 +1456,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+@@ -1295,6 +1469,20 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                  multi_agent_v2_handler(InterruptAgentHandler, tool_namespace),
                  exposure,
              );
@@ -6219,10 +6949,20 @@ index ac1ca68..c2ed7b8 100644
 +                multi_agent_v2_handler(CompactAgentHandler, tool_namespace),
 +                exposure,
 +            );
++            if turn_context
++                .config
++                .features
++                .enabled(Feature::StepModelSwitching)
++            {
++                registry.register_trusted_with_exposure(
++                    multi_agent_v2_handler(SetAgentEffortHandler, tool_namespace),
++                    exposure,
++                );
++            }
              registry.register_trusted_with_exposure(
                  multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                  exposure,
-@@ -1401,8 +1566,19 @@ fn append_extension_tool_executors(
+@@ -1401,8 +1589,19 @@ fn append_extension_tool_executors(
          {
              continue;
          }
@@ -6244,7 +6984,7 @@ index ac1ca68..c2ed7b8 100644
          }
      }
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 8fc47b6..6e70952 100644
+index 8fc47b6..16a9f22 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
 @@ -56,6 +56,7 @@ use crate::tools::handlers::McpHandler;
@@ -6637,6 +7377,81 @@ index 8fc47b6..6e70952 100644
      let spawn_agent_description = spawn_agent.description.as_str();
      assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
      assert!(spawn_agent_description.contains(
+@@ -2889,7 +3216,11 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
+     let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
+         panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
+     };
+-    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
++    for (tool_name, field) in [
++        ("spawn_agent", "shared_context"),
++        ("send_message", "message"),
++        ("followup_task", "message"),
++    ] {
+         let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace.tools.iter().find(|tool| {
+             matches!(
+                 tool,
+@@ -2905,9 +3236,10 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
+             .expect("tool should use object params");
+         assert_eq!(
+             properties
+-                .get("message")
++                .get(field)
+                 .and_then(|schema| schema.encrypted),
+-            Some(true)
++            Some(true),
++            "{tool_name}.{field} should be encrypted"
+         );
+     }
+ }
+@@ -2925,6 +3257,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
+     assert_eq!(
+         plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
+         &[
++            "compact_agent".to_string(),
+             "followup_task".to_string(),
+             "interrupt_agent".to_string(),
+             "list_agents".to_string(),
+@@ -3413,3 +3746,40 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
+     bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
+ }
++
++#[tokio::test]
++async fn multi_agent_v2_effort_tools_follow_step_model_switching() {
++    let without = probe(|turn| {
++        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
++    })
++    .await;
++    assert!(
++        !without
++            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
++            .contains(&"set_agent_effort".to_string())
++    );
++
++    let with = probe(|turn| {
++        set_features(turn, &[Feature::MultiAgentV2, Feature::StepModelSwitching]);
++    })
++    .await;
++    assert!(
++        with.namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
++            .contains(&"set_agent_effort".to_string())
++    );
++    let ToolSpec::Namespace(namespace) = with.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
++        panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
++    };
++    let Some(ResponsesApiNamespaceTool::Function(followup)) = namespace.tools.iter().find(|tool| {
++        matches!(tool, ResponsesApiNamespaceTool::Function(tool) if tool.name == "followup_task")
++    }) else {
++        panic!("expected followup_task");
++    };
++    assert!(
++        followup
++            .parameters
++            .properties
++            .as_ref()
++            .is_some_and(|properties| properties.contains_key("reasoning_effort"))
++    );
++}
 diff --git a/codex-rs/core/src/tools/tool_call_tally.rs b/codex-rs/core/src/tools/tool_call_tally.rs
 new file mode 100644
 index 0000000..867248a
@@ -6878,14 +7693,15 @@ index ac5e47f..4dbf05d 100644
      // If the child is still running when the parent turn starts, wait_agent blocks
      // until mailbox delivery. The follow-up request must then contain that delivery.
 diff --git a/codex-rs/exec/src/event_processor_with_jsonl_output.rs b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
-index 488cbc5..21fe588 100644
+index 488cbc5..d79a48f 100644
 --- a/codex-rs/exec/src/event_processor_with_jsonl_output.rs
 +++ b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
-@@ -247,6 +247,7 @@ impl EventProcessorWithJsonOutput {
+@@ -247,6 +247,8 @@ impl EventProcessorWithJsonOutput {
                          CollabAgentTool::SendMessage
                          | CollabAgentTool::FollowupTask
                          | CollabAgentTool::InterruptAgent
 +                        | CollabAgentTool::CompactAgent
++                        | CollabAgentTool::SetAgentEffort
                          | CollabAgentTool::ListAgents => return None,
                          CollabAgentTool::SpawnAgent => CollabTool::SpawnAgent,
                          CollabAgentTool::SendInput => CollabTool::SendInput,
@@ -7111,34 +7927,37 @@ index 69fabe6..f0c8db8 100644
 +    assert!(model.use_responses_lite);
 +}
 diff --git a/codex-rs/protocol/src/items.rs b/codex-rs/protocol/src/items.rs
-index ccdf2f2..8035c73 100644
+index ccdf2f2..6dbb6b1 100644
 --- a/codex-rs/protocol/src/items.rs
 +++ b/codex-rs/protocol/src/items.rs
-@@ -326,6 +326,7 @@ pub enum CollabAgentTool {
+@@ -326,6 +326,8 @@ pub enum CollabAgentTool {
      SendMessage,
      FollowupTask,
      InterruptAgent,
 +    CompactAgent,
++    SetAgentEffort,
      ListAgents,
  }
  
 diff --git a/codex-rs/protocol/src/legacy_events.rs b/codex-rs/protocol/src/legacy_events.rs
-index fb59d1a..270bbb2 100644
+index fb59d1a..fa0f996 100644
 --- a/codex-rs/protocol/src/legacy_events.rs
 +++ b/codex-rs/protocol/src/legacy_events.rs
-@@ -278,6 +278,7 @@ impl CollabAgentToolCallItem {
+@@ -278,6 +278,8 @@ impl CollabAgentToolCallItem {
              CollabAgentTool::SendMessage
              | CollabAgentTool::FollowupTask
              | CollabAgentTool::InterruptAgent
 +            | CollabAgentTool::CompactAgent
++            | CollabAgentTool::SetAgentEffort
              | CollabAgentTool::ListAgents => None,
              CollabAgentTool::SpawnAgent => Some(EventMsg::CollabAgentSpawnBegin(
                  CollabAgentSpawnBeginEvent {
-@@ -337,6 +338,7 @@ impl CollabAgentToolCallItem {
+@@ -337,6 +339,8 @@ impl CollabAgentToolCallItem {
              CollabAgentTool::SendMessage
              | CollabAgentTool::FollowupTask
              | CollabAgentTool::InterruptAgent
 +            | CollabAgentTool::CompactAgent
++            | CollabAgentTool::SetAgentEffort
              | CollabAgentTool::ListAgents => None,
              CollabAgentTool::SpawnAgent => {
                  let (new_agent_nickname, new_agent_role) = receiver_thread_id
@@ -7241,26 +8060,28 @@ index f5a4648..b17cbd3 100644
                  {"type": "encrypted_content", "encrypted_content": "review this"}
              ]
 diff --git a/codex-rs/tui/src/app/agent_status_feed.rs b/codex-rs/tui/src/app/agent_status_feed.rs
-index 1039b04..b8e17e3 100644
+index 1039b04..b0738f5 100644
 --- a/codex-rs/tui/src/app/agent_status_feed.rs
 +++ b/codex-rs/tui/src/app/agent_status_feed.rs
-@@ -161,6 +161,7 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
+@@ -161,6 +161,8 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
                  CollabAgentTool::SendMessage
                  | CollabAgentTool::FollowupTask
                  | CollabAgentTool::InterruptAgent
 +                | CollabAgentTool::CompactAgent
++                | CollabAgentTool::SetAgentEffort
                  | CollabAgentTool::ListAgents => return None,
                  CollabAgentTool::SpawnAgent => "Spawned an agent",
                  CollabAgentTool::SendInput => "Sent input to an agent",
 diff --git a/codex-rs/tui/src/multi_agents.rs b/codex-rs/tui/src/multi_agents.rs
-index cfa05f7..64a2141 100644
+index cfa05f7..e73dd4c 100644
 --- a/codex-rs/tui/src/multi_agents.rs
 +++ b/codex-rs/tui/src/multi_agents.rs
-@@ -227,6 +227,7 @@ pub(crate) fn tool_call_history_cell(
+@@ -227,6 +227,8 @@ pub(crate) fn tool_call_history_cell(
          CollabAgentTool::SendMessage
          | CollabAgentTool::FollowupTask
          | CollabAgentTool::InterruptAgent
 +        | CollabAgentTool::CompactAgent
++        | CollabAgentTool::SetAgentEffort
          | CollabAgentTool::ListAgents => None,
          CollabAgentTool::SpawnAgent => {
              if matches!(status, CollabAgentToolCallStatus::InProgress) {

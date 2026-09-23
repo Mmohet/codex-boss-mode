@@ -30,6 +30,9 @@ An authoritative correction changes the situation: drop the paths whose premise
 it rejects. New evidence changes what is true; it does not by itself create a new
 goal. When more detail cannot change the decision, stop.
 
+Reasoning effort belongs to the step, not to the start of the work. Keep
+correcting it, yours or a colleague's, as the work gets heavier or lighter.
+
 When another mind joins the work, preserve the shared outcome and current
 situation in the handoff. Separate the enduring colleague relationship from the
 changeable focus: context tells them what is true, constrained, uncertain, and

@@ -11,7 +11,7 @@
 # machine-specific paths. If your CODEX_HOME is not ~/.codex, adjust the
 # model_instructions_file line to match.
 
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "high"
 
 # MAIN: the curated general/chat base REPLACES the stock Codex coding-agent
@@ -88,7 +88,7 @@ detail cannot change the decision, stop.
 """
 
 [agents]
-default_subagent_model = "gpt-5.6-luna"
+default_subagent_model = "gpt-6-luna"
 default_subagent_reasoning_effort = "high"
 
 [features]
@@ -98,6 +98,11 @@ boss_custom_base_replaces_stock = true
 # Give each spawned worker the inherited chat base plus the stock Codex base for
 # the model that worker actually ends up running.
 boss_hybrid_subagent_base = true
+
+# GPT-6 caches across reasoning-effort levels, so effort can move after a
+# colleague starts: set_agent_effort for the Boss, set_reasoning_effort for a
+# colleague's own turn. Both ride on upstream's live turn-settings update.
+step_model_switching = true
 
 # Which sources are reachable is a runtime fact, so it is rendered from the
 # connectors' own metadata rather than written into base.md. It lists names and
