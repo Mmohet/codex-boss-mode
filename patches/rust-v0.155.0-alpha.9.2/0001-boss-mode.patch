@@ -2431,7 +2431,7 @@ index 2981b13..4e0b958 100644
          let reloaded_turn = reloaded_child.session.new_default_turn().await;
          assert_eq!(
 diff --git a/codex-rs/core/src/apply_patch.rs b/codex-rs/core/src/apply_patch.rs
-index 9b3c7a2..eb63a4d 100644
+index 9b3c7a2..125f105 100644
 --- a/codex-rs/core/src/apply_patch.rs
 +++ b/codex-rs/core/src/apply_patch.rs
 @@ -4,6 +4,7 @@ use crate::safety::SafetyCheck;
@@ -2442,7 +2442,7 @@ index 9b3c7a2..eb63a4d 100644
  use crate::tools::sandboxing::ExecApprovalRequirement;
  use codex_apply_patch::ApplyPatchAction;
  use codex_apply_patch::ApplyPatchFileChange;
-@@ -29,6 +30,13 @@ pub(crate) fn prepare_apply_patch(
+@@ -29,6 +30,18 @@ pub(crate) fn prepare_apply_patch(
      sandbox_route: PatchSandboxRoute,
      action: ApplyPatchAction,
  ) -> Result<ApplyPatchRuntimeInvocation, FunctionCallError> {
@@ -2450,6 +2450,11 @@ index 9b3c7a2..eb63a4d 100644
 +        return Err(FunctionCallError::RespondToModel(
 +            "Boss Main does not modify local files directly; delegate substantial execution to a Worker"
 +                .to_string(),
++        ));
++    }
++    if crate::tools::boss_side_conversation_active(&step_context.turn) {
++        return Err(FunctionCallError::RespondToModel(
++            "This side conversation is read-only and does not modify files".to_string(),
 +        ));
 +    }
 +
@@ -3056,7 +3061,7 @@ index af520df..980fe90 100644
  mod normalize;
  pub(crate) mod updates;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 9252c89..b2314c0 100644
+index 9252c89..973fbd1 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -505,6 +505,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
@@ -3222,7 +3227,27 @@ index 9252c89..b2314c0 100644
  impl SessionIo {
      /// Submit the `op` wrapped in a `Submission` with a unique ID.
      pub(crate) async fn submit(&self, op: Op) -> CodexResult<String> {
-@@ -4202,10 +4321,14 @@ impl Session {
+@@ -1644,6 +1763,19 @@ impl Session {
+                 }
+                 self.persist_rollout_items(&rollout_items).await;
+ 
++                // The host's side-conversation instructions never reach the model
++                // on a fork, so say where the boundary is after the inherited
++                // history, where it leaves the cached prefix intact.
++                if crate::tools::boss_side_conversation_active(&turn_context) {
++                    let model_info = Arc::clone(turn_context.model_info());
++                    self.record_conversation_items(
++                        &turn_context,
++                        &model_info,
++                        &[boss_side_boundary_item()],
++                    )
++                    .await;
++                }
++
+                 // Forked threads should remain file-backed immediately after startup.
+                 self.ensure_rollout_materialized(PersistContext::Standard)
+                     .await;
+@@ -4202,10 +4334,14 @@ impl Session {
              .plugins_for_config(&turn_context.config.plugins_config_input())
              .await
              .without_plugins(&turn_context.disabled_plugin_ids);
@@ -3237,6 +3262,27 @@ index 9252c89..b2314c0 100644
          {
              let auth = self.services.auth_manager.auth().await;
              let plugins_config = turn_context.config.plugins_config_input();
+@@ -5021,3 +5157,20 @@ mod elicitation_holders_tests;
+ 
+ #[cfg(test)]
+ pub(crate) mod tests;
++
++/// What a side question forked off Boss Main is for, stated after the history
++/// it inherits. Main's own instructions, still at the top of that history, tell
++/// it to lead and delegate; this tells it that here it does neither.
++const BOSS_SIDE_BOUNDARY: &str = "Side conversation. Everything above is the main conversation, carried over for reference: it is not your task, and you are not its lead here. Nothing said here goes back to it. The user is asking questions. Answer each in as few steps as will settle it, most often straight from what is already above; look something up only when the answer truly depends on it. Everything here is read-only and there are no colleagues: do not continue the main conversation's work or reach anyone in it.";
++
++fn boss_side_boundary_item() -> ResponseItem {
++    ResponseItem::Message {
++        id: None,
++        role: "developer".to_string(),
++        content: vec![ContentItem::InputText {
++            text: BOSS_SIDE_BOUNDARY.to_string(),
++        }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    }
++}
 diff --git a/codex-rs/core/src/session/multi_agents.rs b/codex-rs/core/src/session/multi_agents.rs
 index 19d0cb9..110ca44 100644
 --- a/codex-rs/core/src/session/multi_agents.rs
@@ -3897,7 +3943,7 @@ index 745756d..b4b13e4 100644
  
      let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 1f80548..6e69b2c 100644
+index 1f80548..0eb822d 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -40,6 +40,7 @@ use crate::session::session::Session;
@@ -3908,7 +3954,7 @@ index 1f80548..6e69b2c 100644
  use crate::stream_events_utils::HandleOutputCtx;
  use crate::stream_events_utils::InFlightFuture;
  use crate::stream_events_utils::TurnItemContributorPolicy;
-@@ -1518,11 +1519,14 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+@@ -1518,11 +1519,18 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
  
  #[instrument(level = "trace", skip_all)]
  pub(crate) fn build_prompt(
@@ -3918,13 +3964,17 @@ index 1f80548..6e69b2c 100644
      base_instructions: BaseInstructions,
  ) -> Prompt {
      let turn_context = &step_context.turn;
-+    if crate::tools::boss_main_execution_isolation_active(turn_context) {
++    // A side conversation carries Main's history, so it must age evidence the
++    // same way or its prefix stops matching Main's and misses the cache.
++    if crate::tools::boss_main_execution_isolation_active(turn_context)
++        || crate::tools::boss_side_conversation_active(turn_context)
++    {
 +        crate::context_manager::boss_projection::project(&mut input);
 +    }
      Prompt {
          input,
          tools: step_context.tool_router.model_visible_specs(),
-@@ -2464,6 +2468,11 @@ async fn try_run_sampling_request(
+@@ -2464,6 +2472,11 @@ async fn try_run_sampling_request(
          .instrument(trace_span!("stream_request"))
          .or_cancel(&cancellation_token)
          .await??;
@@ -3936,7 +3986,7 @@ index 1f80548..6e69b2c 100644
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
-@@ -2546,6 +2555,13 @@ async fn try_run_sampling_request(
+@@ -2546,6 +2559,13 @@ async fn try_run_sampling_request(
              }
              ResponseEvent::OutputItemDone(mut item) => {
                  assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
@@ -3950,7 +4000,7 @@ index 1f80548..6e69b2c 100644
                  if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                      let call_id = match &item {
                          ResponseItem::FunctionCall { call_id, .. }
-@@ -2608,6 +2624,7 @@ async fn try_run_sampling_request(
+@@ -2608,6 +2628,7 @@ async fn try_run_sampling_request(
                      turn_store: Arc::clone(&turn_store),
                      tool_runtime: tool_runtime.clone(),
                      cancellation_token: cancellation_token.child_token(),
@@ -4313,7 +4363,7 @@ index 2a7c481..f36c3eb 100644
              session.services.analytics_events_client.clone(),
              session.thread_id.to_string(),
 diff --git a/codex-rs/core/src/tools/handlers/apply_patch.rs b/codex-rs/core/src/tools/handlers/apply_patch.rs
-index 5ab6666..5ab1fa1 100644
+index 5ab6666..caa1df9 100644
 --- a/codex-rs/core/src/tools/handlers/apply_patch.rs
 +++ b/codex-rs/core/src/tools/handlers/apply_patch.rs
 @@ -14,6 +14,7 @@ use crate::session::session::Session;
@@ -4324,7 +4374,7 @@ index 5ab6666..5ab1fa1 100644
  use crate::tools::context::ApplyPatchToolOutput;
  use crate::tools::context::FunctionToolOutput;
  use crate::tools::context::SharedTurnDiffTracker;
-@@ -377,6 +378,12 @@ impl ApplyPatchHandler {
+@@ -377,6 +378,17 @@ impl ApplyPatchHandler {
                  "apply_patch handler received unsupported payload".to_string(),
              ));
          };
@@ -4334,9 +4384,33 @@ index 5ab6666..5ab1fa1 100644
 +                    .to_string(),
 +            ));
 +        }
++        if crate::tools::boss_side_conversation_active(&turn) {
++            return Err(FunctionCallError::RespondToModel(
++                "This side conversation is read-only and does not modify files".to_string(),
++            ));
++        }
          let args = match codex_apply_patch::parse_patch(&patch_input) {
              Ok(args) => args,
              Err(parse_error) => {
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+index 509cab2..2ad62ee 100644
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -288,6 +288,14 @@ impl CoreToolRuntime for McpHandler {
+         Some(&self.tool_info.server_name)
+     }
+ 
++    fn mcp_read_only_hint(&self) -> Option<bool> {
++        self.tool_info
++            .tool
++            .annotations
++            .as_ref()
++            .and_then(|annotations| annotations.read_only_hint)
++    }
++
+     fn on_tool_result_accepted(&self, invocation: &ToolInvocation, result: &dyn ToolOutput) {
+         invocation
+             .session
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
 index 73d63fa..c1ce588 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
@@ -5986,18 +6060,19 @@ index cabe62c..4fd6dbf 100644
          defer_loading: None,
          parameters: JsonSchema::object(
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
-index 0a026fb..0bd6560 100644
+index 0a026fb..94c31e3 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
-@@ -6,6 +6,7 @@ use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+@@ -6,6 +6,8 @@ use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
  use crate::exec_policy::prompt_is_rejected_by_policy;
  use crate::function_tool::FunctionCallError;
  use crate::maybe_emit_implicit_skill_invocation;
 +use crate::tools::boss_main_execution_isolation_active;
++use crate::tools::boss_side_conversation_active;
  use crate::tools::context::ExecCommandToolOutput;
  use crate::tools::context::ToolInvocation;
  use crate::tools::context::ToolPayload;
-@@ -184,7 +185,7 @@ impl ExecCommandHandler {
+@@ -184,7 +186,7 @@ impl ExecCommandHandler {
              call_id.clone(),
          );
          let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
@@ -6006,16 +6081,19 @@ index 0a026fb..0bd6560 100644
              &step_context.environments,
              environment_args.environment_id.as_deref(),
          )?
-@@ -193,6 +194,18 @@ impl ExecCommandHandler {
+@@ -193,6 +195,21 @@ impl ExecCommandHandler {
                  "unified exec is unavailable in this session".to_string(),
              ));
          };
 +        let boss_main = boss_main_execution_isolation_active(&turn);
++        // A side conversation looks but never touches, on the same narrowed view.
++        let side_conversation = boss_side_conversation_active(&turn);
++        let read_only_shell = boss_main || side_conversation;
 +        // Owner-provided environments are authoritative for Workers, but the
 +        // root Boss must not inherit their writable local profile. Keep the
 +        // original environment only when an external sandbox owns enforcement;
 +        // Codex cannot safely narrow that platform boundary itself.
-+        let turn_environment = if boss_main {
++        let turn_environment = if read_only_shell {
 +            selected_turn_environment
 +                .boss_main_read_only()
 +                .unwrap_or_else(|| selected_turn_environment.clone())
@@ -6025,35 +6103,38 @@ index 0a026fb..0bd6560 100644
          let native_environment_cwd = turn_environment.cwd().clone();
          let cwd = environment_args
              .workdir
-@@ -248,6 +261,15 @@ impl ExecCommandHandler {
+@@ -248,6 +265,18 @@ impl ExecCommandHandler {
          }
          let sandbox_permissions =
              resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
-+        if boss_main
++        if read_only_shell
 +            && (sandbox_permissions.requests_sandbox_override()
 +                || args.additional_permissions.is_some())
 +        {
-+            return Err(FunctionCallError::RespondToModel(
++            return Err(FunctionCallError::RespondToModel(if side_conversation {
++                "This side conversation is read-only and cannot request write or escalated shell permissions"
++                    .to_string()
++            } else {
 +                "Boss Main cannot request local write or escalated shell permissions; delegate execution to a Worker"
-+                    .to_string(),
-+            ));
++                    .to_string()
++            }));
 +        }
          let hook_command = args.cmd.clone();
          maybe_emit_implicit_skill_invocation(
              session.as_ref(),
-@@ -317,8 +339,9 @@ impl ExecCommandHandler {
+@@ -317,8 +346,9 @@ impl ExecCommandHandler {
              }
          };
  
 -        let exec_permission_approvals_enabled =
 -            session.features().enabled(Feature::ExecPermissionApprovals);
-+        let exec_permission_approvals_enabled = !boss_main
++        let exec_permission_approvals_enabled = !read_only_shell
 +            && self.options.exec_permission_approvals_enabled
 +            && session.features().enabled(Feature::ExecPermissionApprovals);
          let requested_additional_permissions = additional_permissions.clone();
          let sandbox_context =
              turn_environment.sandbox_context(/*additional_permissions*/ None);
-@@ -330,14 +353,24 @@ impl ExecCommandHandler {
+@@ -330,14 +360,24 @@ impl ExecCommandHandler {
                  "selected environment sandbox context is missing cwd".to_string(),
              ));
          };
@@ -6067,7 +6148,7 @@ index 0a026fb..0bd6560 100644
              additional_permissions,
          )
          .await;
-+        if boss_main {
++        if read_only_shell {
 +            // Sticky session/turn grants must not reopen the root Boss's local
 +            // execution surface after the environment was narrowed above.
 +            effective_additional_permissions =
@@ -6104,7 +6185,7 @@ index 5f9d9cf..8f2e02a 100644
              UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
          let response = session
 diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
-index 4098be8..cd33488 100644
+index 4098be8..9270b44 100644
 --- a/codex-rs/core/src/tools/mod.rs
 +++ b/codex-rs/core/src/tools/mod.rs
 @@ -1,3 +1,4 @@
@@ -6132,7 +6213,7 @@ index 4098be8..cd33488 100644
      model_info.tool_mode.unwrap_or_else(|| {
          if turn_context.config.features.enabled(Feature::CodeModeOnly) {
              ToolMode::CodeModeOnly
-@@ -78,6 +92,19 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
+@@ -78,6 +92,46 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
      })
  }
  
@@ -6147,12 +6228,39 @@ index 4098be8..cd33488 100644
 +        .features
 +        .enabled(Feature::BossMainDecisionLayer)
 +        && !turn_context.session_source.is_non_root_agent()
++        && !boss_side_conversation_active(turn_context)
++}
++
++/// The sentence both Codex hosts open their side-conversation instructions with.
++const SIDE_CONVERSATION_MARKER: &str = "You are in a side conversation, not the main thread.";
++
++/// Returns whether this turn is a quick side question forked off a Boss Main.
++///
++/// A side conversation is not the decision layer: it answers a question and is
++/// thrown away, so the isolation that keeps Main's context clean has nothing to
++/// protect. It gets its own narrower rule instead: read-only, no colleagues.
++///
++/// Hosts mark a side conversation only through the developer instructions they
++/// send with an ephemeral fork. Core never shows the model those instructions
++/// on a fork (the inherited initial context is kept for the cache), which is
++/// why Boss states the boundary itself.
++pub(crate) fn boss_side_conversation_active(turn_context: &TurnContext) -> bool {
++    turn_context
++        .config
++        .features
++        .enabled(Feature::BossMainDecisionLayer)
++        && !turn_context.session_source.is_non_root_agent()
++        && turn_context.config.ephemeral
++        && turn_context
++            .developer_instructions
++            .as_deref()
++            .is_some_and(|instructions| instructions.contains(SIDE_CONVERSATION_MARKER))
 +}
 +
  pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
      let requested_tool_mode = requested_tool_mode(turn_context, model_info);
      if !turn_context.code_mode_available
-@@ -141,3 +168,6 @@ fn build_content_with_timeout(exec_output: &ExecToolCallOutput) -> String {
+@@ -141,3 +195,6 @@ fn build_content_with_timeout(exec_output: &ExecToolCallOutput) -> String {
          exec_output.aggregated_output.text.clone()
      }
  }
@@ -6177,7 +6285,7 @@ index c3bb77a..fad0968 100644
      pub(crate) fn handle_tool_call(
          self,
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index addf027..711daf0 100644
+index addf027..7843cd1 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
 @@ -46,6 +46,13 @@ use serde_json::Value;
@@ -6194,7 +6302,20 @@ index addf027..711daf0 100644
  pub use codex_tools::ToolExecutor;
  pub use codex_tools::ToolExposure;
  
-@@ -282,6 +289,7 @@ pub(crate) struct PostToolUsePayload {
+@@ -79,6 +86,12 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+         None
+     }
+ 
++    /// Whether an MCP-backed tool declares that it only reads. `None` for
++    /// non-MCP tools and for MCP tools that say nothing.
++    fn mcp_read_only_hint(&self) -> Option<bool> {
++        None
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(
+             payload,
+@@ -282,6 +295,7 @@ pub(crate) struct PostToolUsePayload {
  pub(crate) struct RegisteredTool {
      pub(crate) runtime: Arc<dyn CoreToolRuntime>,
      pub(crate) exposure: ToolExposure,
@@ -6202,7 +6323,7 @@ index addf027..711daf0 100644
  }
  
  #[derive(Default)]
-@@ -324,6 +332,21 @@ impl ToolRegistry {
+@@ -324,6 +338,21 @@ impl ToolRegistry {
          self.register_trusted_with_exposure(Arc::new(handler), exposure);
      }
  
@@ -6224,7 +6345,7 @@ index addf027..711daf0 100644
      pub(crate) fn register_trusted(&mut self, runtime: Arc<dyn CoreToolRuntime>) {
          let exposure = runtime.exposure();
          self.register_trusted_with_exposure(runtime, exposure);
-@@ -333,6 +356,19 @@ impl ToolRegistry {
+@@ -333,6 +362,19 @@ impl ToolRegistry {
          &mut self,
          runtime: Arc<dyn CoreToolRuntime>,
          exposure: ToolExposure,
@@ -6244,7 +6365,7 @@ index addf027..711daf0 100644
      ) {
          let tool_name = runtime.tool_name().with_default_namespace();
          if self
-@@ -344,7 +380,11 @@ impl ToolRegistry {
+@@ -344,7 +386,11 @@ impl ToolRegistry {
          }
          match self.tools.entry(tool_name) {
              Entry::Vacant(entry) => {
@@ -6257,7 +6378,7 @@ index addf027..711daf0 100644
              }
              Entry::Occupied(entry) => {
                  let tool_name = entry.key();
-@@ -368,8 +408,15 @@ impl ToolRegistry {
+@@ -368,8 +414,15 @@ impl ToolRegistry {
          }
  
          let exposure = runtime.exposure();
@@ -6275,7 +6396,7 @@ index addf027..711daf0 100644
      }
  
      pub(crate) fn register_external(&mut self, runtime: Arc<dyn CoreToolRuntime>) -> bool {
-@@ -381,6 +428,19 @@ impl ToolRegistry {
+@@ -381,6 +434,19 @@ impl ToolRegistry {
          &mut self,
          runtime: Arc<dyn CoreToolRuntime>,
          exposure: ToolExposure,
@@ -6295,7 +6416,7 @@ index addf027..711daf0 100644
      ) -> bool {
          let tool_name = runtime.tool_name().with_default_namespace();
          if self
-@@ -402,7 +462,11 @@ impl ToolRegistry {
+@@ -402,7 +468,11 @@ impl ToolRegistry {
  
          match self.tools.entry(tool_name) {
              Entry::Vacant(entry) => {
@@ -6308,7 +6429,7 @@ index addf027..711daf0 100644
                  true
              }
              Entry::Occupied(entry) => {
-@@ -541,6 +605,13 @@ impl ToolRegistry {
+@@ -541,6 +611,13 @@ impl ToolRegistry {
                  turn_state.tool_calls = turn_state.tool_calls.saturating_add(1);
              }
          }
@@ -6442,18 +6563,19 @@ index 05a1e2e..8c787f0 100644
  }
  
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index ac1ca68..d30952b 100644
+index ac1ca68..8285fde 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
-@@ -4,6 +4,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
+@@ -4,6 +4,8 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::image_preparation::unified_image_budget_enabled;
  use crate::session::session::Session;
  use crate::session::turn_context::TurnContext;
 +use crate::tools::boss_main_execution_isolation_active;
++use crate::tools::boss_side_conversation_active;
  use crate::tools::code_mode::execute_spec::create_code_mode_tool;
  use crate::tools::context::ToolInvocation;
  use crate::tools::effective_tool_mode;
-@@ -45,6 +46,9 @@ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
+@@ -45,6 +47,9 @@ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
  use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
  use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
  use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -6463,7 +6585,7 @@ index ac1ca68..d30952b 100644
  use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
  use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
  use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
-@@ -54,6 +58,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
+@@ -54,6 +59,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
  use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
  use crate::tools::hosted_spec::WebSearchToolOptions;
  use crate::tools::hosted_spec::create_web_search_tool;
@@ -6471,7 +6593,7 @@ index ac1ca68..d30952b 100644
  use crate::tools::registry::CoreToolRuntime;
  #[cfg(test)]
  use crate::tools::registry::RegisteredTool;
-@@ -153,33 +158,42 @@ pub(crate) fn build_tool_router(
+@@ -153,33 +159,42 @@ pub(crate) fn build_tool_router(
      let mut registry = ToolRegistry::with_allowed_tools(session.allowed_tools.clone());
      add_core_tool_sources(&context, &mut registry);
  
@@ -6541,7 +6663,7 @@ index ac1ca68..d30952b 100644
  
      finalize_tool_router(
          turn_context,
-@@ -304,8 +318,14 @@ pub(crate) fn append_source_tools(
+@@ -304,8 +319,14 @@ pub(crate) fn append_source_tools(
      >,
      dynamic_tools: &[DynamicToolSpec],
  ) -> Vec<ToolSpec> {
@@ -6558,7 +6680,7 @@ index ac1ca68..d30952b 100644
      }
      let standalone_web_search_tool = append_extension_tool_executors(
          turn_context,
-@@ -313,7 +333,11 @@ pub(crate) fn append_source_tools(
+@@ -313,7 +334,11 @@ pub(crate) fn append_source_tools(
          extension_tool_executors,
          registry,
      );
@@ -6571,15 +6693,16 @@ index ac1ca68..d30952b 100644
      hosted_model_tool_specs(
          turn_context,
          model_info,
-@@ -351,6 +375,7 @@ pub(crate) fn finalize_tool_router(
+@@ -351,6 +376,8 @@ pub(crate) fn finalize_tool_router(
      if let Some(allowed) = &registry.allowed_tools {
          hosted_specs.retain(|spec| allowed.contains(&ToolName::plain(spec.name())));
      }
 +    remove_boss_main_mcp_tools(turn_context, &mut registry);
++    retain_side_conversation_tools(turn_context, &mut registry);
      apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
      let tool_mode = effective_tool_mode(turn_context, model_info);
      let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
-@@ -365,7 +390,8 @@ pub(crate) fn finalize_tool_router(
+@@ -365,7 +392,8 @@ pub(crate) fn finalize_tool_router(
          }
      }
      let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
@@ -6589,7 +6712,7 @@ index ac1ca68..d30952b 100644
          && registry.entries().any(|tool| {
              tool.runtime.tool_name() != tool_search_name
                  && tool.exposure.is_deferred()
-@@ -522,6 +548,21 @@ fn apply_direct_model_only_namespace_overrides(
+@@ -522,6 +550,58 @@ fn apply_direct_model_only_namespace_overrides(
      }
  }
  
@@ -6608,10 +6731,47 @@ index ac1ca68..d30952b 100644
 +    }
 +}
 +
++/// A side conversation keeps what Boss Main may use, plus the means to look
++/// without touching: the shell (narrowed to read-only at execution) and MCP
++/// tools that declare themselves read-only. Everything else a Worker would
++/// have — colleagues, patches, writing connectors, client tools with no
++/// provenance — is dropped here, before code mode builds its nested tool set,
++/// so neither direct calls nor `exec` can reach them.
++fn retain_side_conversation_tools(turn_context: &TurnContext, registry: &mut ToolRegistry) {
++    if !boss_side_conversation_active(turn_context) {
++        return;
++    }
++    let dropped = registry
++        .entries()
++        .filter(|tool| {
++            if tool.boss_main_capability != BossMainToolCapability::WorkerOnly {
++                return false;
++            }
++            if tool.runtime.mcp_server_name().is_some() {
++                return tool.runtime.mcp_read_only_hint() != Some(true);
++            }
++            let name = tool.runtime.tool_name();
++            !(name.is_default_namespace()
++                && matches!(
++                    name.name.as_str(),
++                    "exec_command"
++                        | "write_stdin"
++                        | "list_mcp_resources"
++                        | "list_mcp_resource_templates"
++                        | "read_mcp_resource"
++                ))
++        })
++        .map(|tool| tool.runtime.tool_name())
++        .collect::<Vec<_>>();
++    for tool_name in dropped {
++        registry.remove(&tool_name);
++    }
++}
++
  #[instrument(level = "trace", skip_all)]
  fn build_model_visible_specs(
      turn_context: &TurnContext,
-@@ -530,14 +571,39 @@ fn build_model_visible_specs(
+@@ -530,14 +610,39 @@ fn build_model_visible_specs(
      code_mode_tool_names: &BTreeMap<String, ToolName>,
      hosted_specs: Vec<ToolSpec>,
  ) -> Vec<ToolSpec> {
@@ -6653,7 +6813,7 @@ index ac1ca68..d30952b 100644
          if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure) {
              continue;
          }
-@@ -552,7 +618,17 @@ fn build_model_visible_specs(
+@@ -552,7 +657,17 @@ fn build_model_visible_specs(
              spec,
          ));
      }
@@ -6672,7 +6832,7 @@ index ac1ca68..d30952b 100644
  
      merge_into_namespaces(specs)
          .into_iter()
-@@ -562,6 +638,45 @@ fn build_model_visible_specs(
+@@ -562,6 +677,45 @@ fn build_model_visible_specs(
          .collect()
  }
  
@@ -6718,7 +6878,7 @@ index ac1ca68..d30952b 100644
  fn spec_for_model_request(
      turn_context: &TurnContext,
      model_info: &ModelInfo,
-@@ -981,8 +1096,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+@@ -981,8 +1135,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
          return;
      }
  
@@ -6733,7 +6893,7 @@ index ac1ca68..d30952b 100644
      add_core_utility_tools(context, registry);
      add_collaboration_tools(context, registry);
  }
-@@ -1044,8 +1163,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
+@@ -1044,8 +1202,10 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
      if is_guardian && !features.enabled(Feature::UnifiedExec) {
          return;
      }
@@ -6741,11 +6901,12 @@ index ac1ca68..d30952b 100644
 -        features.enabled(Feature::ExecPermissionApprovals) && !is_guardian;
 +    let exec_permission_approvals_enabled = features.enabled(Feature::ExecPermissionApprovals)
 +        && !is_guardian
-+        && !boss_main_execution_isolation_active(turn_context);
++        && !boss_main_execution_isolation_active(turn_context)
++        && !boss_side_conversation_active(turn_context);
      let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
      let options = ExecCommandHandlerOptions {
          allow_login_shell,
-@@ -1096,12 +1216,27 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1096,12 +1256,27 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
      let features = turn_context.config.features.get();
      let environment_mode = tool_environment_mode(context.environments);
  
@@ -6775,7 +6936,7 @@ index ac1ca68..d30952b 100644
              context
                  .wait_for_environment_tool_config
                  .map(Arc::as_ref)
-@@ -1109,15 +1244,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1109,15 +1284,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                      WaitForEnvironmentHandler::default,
                      WaitForEnvironmentHandler::new,
                  ),
@@ -6795,7 +6956,7 @@ index ac1ca68..d30952b 100644
          );
      }
  
-@@ -1134,7 +1272,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1134,7 +1312,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                  )
              })
      {
@@ -6804,7 +6965,7 @@ index ac1ca68..d30952b 100644
              RequestUserInputAsyncHandler {
                  description: context
                      .model_messages
-@@ -1143,6 +1281,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1143,6 +1321,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                      .and_then(|tool| tool.description.clone()),
              },
              ToolExposure::DirectModelOnly,
@@ -6812,7 +6973,7 @@ index ac1ca68..d30952b 100644
          );
      }
  
-@@ -1157,13 +1296,24 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1157,13 +1336,24 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
      }
  
@@ -6840,7 +7001,7 @@ index ac1ca68..d30952b 100644
      }
  
      let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);
-@@ -1173,7 +1323,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1173,7 +1363,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "clock");
      if current_time_reminder_enabled || model_has_clock {
@@ -6853,7 +7014,7 @@ index ac1ca68..d30952b 100644
      }
      if features.enabled(Feature::SleepTool)
          && match turn_context.config.sleep_tool_mode {
-@@ -1191,7 +1345,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1191,7 +1385,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              }
          }
      {
@@ -6866,7 +7027,7 @@ index ac1ca68..d30952b 100644
      }
  
      if tool_suggest_enabled(turn_context)
-@@ -1200,17 +1358,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1200,17 +1398,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              .filter(|candidates| !candidates.tools.is_empty())
      {
          if candidates.presentation == crate::tools::router::ToolSuggestPresentation::ListTool {
@@ -6900,7 +7061,7 @@ index ac1ca68..d30952b 100644
          let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
          registry.add(ApplyPatchHandler::new(include_environment_id));
      }
-@@ -1221,21 +1387,29 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1221,27 +1427,39 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "test_sync_tool")
      {
@@ -6941,7 +7102,17 @@ index ac1ca68..d30952b 100644
      }
  }
  
-@@ -1295,6 +1469,20 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+ #[instrument(level = "trace", skip_all)]
+ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
+     let turn_context = context.turn_context;
++    // A side question is answered where it is asked; it does not start work.
++    if boss_side_conversation_active(turn_context) {
++        return;
++    }
+     if collab_tools_enabled(turn_context, context.model_info) {
+         if multi_agent_v2_enabled(turn_context) {
+             let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
+@@ -1295,6 +1513,20 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                  multi_agent_v2_handler(InterruptAgentHandler, tool_namespace),
                  exposure,
              );
@@ -6962,7 +7133,7 @@ index ac1ca68..d30952b 100644
              registry.register_trusted_with_exposure(
                  multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                  exposure,
-@@ -1401,8 +1589,19 @@ fn append_extension_tool_executors(
+@@ -1401,8 +1633,19 @@ fn append_extension_tool_executors(
          {
              continue;
          }
@@ -6984,7 +7155,7 @@ index ac1ca68..d30952b 100644
          }
      }
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 8fc47b6..16a9f22 100644
+index 8fc47b6..dacb948 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
 @@ -56,6 +56,7 @@ use crate::tools::handlers::McpHandler;
@@ -7411,7 +7582,7 @@ index 8fc47b6..16a9f22 100644
              "followup_task".to_string(),
              "interrupt_agent".to_string(),
              "list_agents".to_string(),
-@@ -3413,3 +3746,40 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+@@ -3413,3 +3746,108 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
      bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
      bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
  }
@@ -7451,6 +7622,74 @@ index 8fc47b6..16a9f22 100644
 +            .as_ref()
 +            .is_some_and(|properties| properties.contains_key("reasoning_effort"))
 +    );
++}
++
++fn read_only_mcp_runtime(server: &str, namespace: &str, name: &str) -> RegisteredTool {
++    let mut tool = mcp_tool(server, namespace, name);
++    tool.tool = tool
++        .tool
++        .annotate(rmcp::model::ToolAnnotations::new().read_only(true));
++    RegisteredTool {
++        runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
++        exposure: ToolExposure::Direct,
++        boss_main_capability: BossMainToolCapability::WorkerOnly,
++    }
++}
++
++#[tokio::test]
++async fn boss_side_conversation_reads_without_colleagues_or_writes() {
++    let inputs = || ToolPlanInputs {
++        tool_runtimes: vec![
++            read_only_mcp_runtime("github", "mcp__github", "search_issues"),
++            mcp_runtime("github", "mcp__github", "create_issue", ToolExposure::Direct),
++        ],
++        dynamic_tools: vec![dynamic_tool(Some("clickup"), "list_tasks", false)],
++        ..ToolPlanInputs::default()
++    };
++    let configure = |side: bool| {
++        move |turn: &mut TurnContext| {
++            set_features(
++                turn,
++                &[
++                    Feature::BossMainDecisionLayer,
++                    Feature::MultiAgentV2,
++                    Feature::ShellTool,
++                    Feature::UnifiedExec,
++                    Feature::RequestPermissionsTool,
++                ],
++            );
++            update_turn_settings_for_test(turn, |settings| {
++                Arc::make_mut(&mut settings.model_info).shell_type =
++                    ConfigShellToolType::UnifiedExec;
++                Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
++                    Some(ApplyPatchToolType::Freeform);
++            });
++            update_config(turn, |config| config.ephemeral = side);
++            turn.developer_instructions = Some(
++                "Host instructions.\n\nYou are in a side conversation, not the main thread."
++                    .to_string(),
++            );
++        }
++    };
++    let search = ToolName::namespaced("mcp__github", "search_issues").to_string();
++    let create = ToolName::namespaced("mcp__github", "create_issue").to_string();
++    let dynamic = ToolName::namespaced("clickup", "list_tasks").to_string();
++
++    let side = probe_with(configure(true), inputs()).await;
++    side.assert_registered_contains(&["exec_command", "write_stdin", search.as_str()]);
++    side.assert_registered_lacks(&[
++        "apply_patch",
++        "request_permissions",
++        "spawn_agent",
++        "followup_task",
++        create.as_str(),
++        dynamic.as_str(),
++    ]);
++    side.assert_visible_lacks(&["spawn_agent", "apply_patch"]);
++
++    // Without the ephemeral fork it is Main itself: still no shell and no MCP.
++    let main = probe_with(configure(false), inputs()).await;
++    main.assert_registered_lacks(&["exec_command", search.as_str()]);
 +}
 diff --git a/codex-rs/core/src/tools/tool_call_tally.rs b/codex-rs/core/src/tools/tool_call_tally.rs
 new file mode 100644
@@ -7662,6 +7901,95 @@ index 82ed5f5..ec03f37 100644
                  /*trigger_turn*/ false,
              ),
              start_options: Default::default(),
+diff --git a/codex-rs/core/tests/suite/prompt_cache_key.rs b/codex-rs/core/tests/suite/prompt_cache_key.rs
+index 4b429a9..f7abe87 100644
+--- a/codex-rs/core/tests/suite/prompt_cache_key.rs
++++ b/codex-rs/core/tests/suite/prompt_cache_key.rs
+@@ -218,3 +218,84 @@ async fn ephemeral_fork_shares_cache_routing_but_keeps_session_identity() -> Res
+     );
+     Ok(())
+ }
++
++#[tokio::test]
++async fn boss_side_fork_states_its_boundary_after_the_cached_prefix() -> Result<()> {
++    use codex_core::ForkSnapshot;
++    use codex_core::StartThreadOptions;
++    use core_test_support::responses::mount_sse_sequence;
++
++    const SIDE_MARKER: &str = "You are in a side conversation, not the main thread.";
++    const BOUNDARY: &str = "Side conversation. Everything above is the main conversation";
++
++    let server = start_mock_server().await;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![ev_completed("main")]),
++            sse(vec![ev_completed("side")]),
++            sse(vec![ev_completed("plain")]),
++        ],
++    )
++    .await;
++    let mut test = test_codex()
++        .with_config(|config| {
++            config
++                .features
++                .enable(Feature::BossMainDecisionLayer)
++                .expect("enable boss main");
++            config
++                .features
++                .enable(Feature::MultiAgentV2)
++                .expect("enable multi-agent v2");
++            config.developer_instructions = Some("Main instructions.".to_string());
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_text_turn("main").await?;
++    test.codex.flush_rollout().await?;
++    let parent_rollout = test.codex.rollout_path().expect("parent rollout");
++    let environments = test.codex.environment_selections().await;
++    let fork = |developer_instructions: String| {
++        let mut config = test.config.clone();
++        config.ephemeral = true;
++        config.developer_instructions = Some(developer_instructions);
++        test.thread_manager.fork_thread(
++            ForkSnapshot::TruncateBeforeNthUserMessage(usize::MAX),
++            StartThreadOptions {
++                environments: Some(environments.clone()),
++                ..StartThreadOptions::new(config)
++            },
++            parent_rollout.clone(),
++        )
++    };
++
++    let side = fork(format!("Main instructions.\n\n{SIDE_MARKER}")).await?;
++    let plain = fork("Main instructions.".to_string()).await?;
++    test.codex = side.thread;
++    test.submit_text_turn("side question").await?;
++    test.codex = plain.thread;
++    test.submit_text_turn("plain fork").await?;
++
++    let requests = requests.requests();
++    let main_input = requests[0].body_json()["input"].as_array().unwrap().clone();
++    let side_input = requests[1].body_json()["input"].as_array().unwrap().clone();
++    let plain_input = requests[2].body_json()["input"].as_array().unwrap().clone();
++
++    // Main's whole request is the side conversation's prefix, then the boundary.
++    assert_eq!(side_input[..main_input.len()], main_input[..]);
++    let boundary = &side_input[main_input.len()];
++    assert_eq!(boundary["role"], "developer");
++    assert!(boundary.to_string().contains(BOUNDARY));
++    assert!(
++        side_input.last().unwrap().to_string().contains("side question"),
++        "the question follows the boundary"
++    );
++    // Main can invite colleagues; the side conversation cannot.
++    assert!(requests[0].body_json()["tools"].to_string().contains("spawn_agent"));
++    assert!(!requests[1].body_json()["tools"].to_string().contains("spawn_agent"));
++
++    // An ordinary ephemeral fork is not a side conversation.
++    assert!(!Value::Array(plain_input).to_string().contains(BOUNDARY));
++    Ok(())
++}
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
 index ac5e47f..4dbf05d 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
