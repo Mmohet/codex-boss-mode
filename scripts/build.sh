@@ -54,9 +54,6 @@ else
       && git fetch --depth 1 --quiet origin "refs/tags/${TARGET}:refs/tags/${TARGET}" ) \
       || fail "could not fetch $TARGET into $UPSTREAM_DIR"
   fi
-  # Drop any previous patch application so the merge starts from clean upstream.
-  ( cd "$UPSTREAM_DIR" && git reset --hard --quiet "$TARGET" && git clean -fdq -e /codex-rs/target ) \
-    || fail "could not reset $UPSTREAM_DIR to $TARGET"
 fi
 
 # `git apply -3` needs the blobs the patch was generated against, and a shallow
@@ -68,23 +65,60 @@ if [[ "$PATCH_SET" != "$TARGET" ]]; then
     || note "warning: could not fetch the $PATCH_SET baseline; the merge will fall back to plain context matching"
 fi
 
-for p in "$PATCH_DIR"/*.patch; do
-  if ! ( cd "$UPSTREAM_DIR" && git apply -3 "$p" ); then
-    conflicted=$( cd "$UPSTREAM_DIR" && git diff --name-only --diff-filter=U )
-    print -u2 ""
-    print -u2 "$SCRIPT_NAME: ${p:t} did not merge onto $TARGET."
-    if [[ -n "$conflicted" ]]; then
-      print -u2 "  Conflicting files:"
-      print -u2 "$conflicted" | sed 's/^/    /'
-      print -u2 "  The checkout is left in place with the conflicts, so you can resolve"
-      print -u2 "  them in $UPSTREAM_DIR, confirm it builds, and record the result:"
-      print -u2 "    mkdir -p patches/$TARGET"
-      print -u2 "    (cd upstream && git diff $TARGET -- codex-rs/) > patches/$TARGET/0001-boss-mode.patch"
+# Cargo decides what to recompile from file mtimes. Resetting to the tag and
+# re-applying rewrote every patched file on every build, content changed or
+# not, and the patch touches protocol and features, which most of the binary's
+# workspace crates depend on, so each build was close to a full rebuild. Build
+# the patched tree in a private index instead and move the checkout onto it the
+# way a checkout does: only paths whose content differs are written. The end
+# state is the same as before — HEAD on the tag, the patch staged in the index
+# and present in the worktree, untracked files cleaned. A patch that does not
+# merge cleanly leaves the checkout untouched and takes the in-place path
+# below, so conflicts still land in $UPSTREAM_DIR for resolution.
+patched_tree=""
+scratch_dir="$(mktemp -d)"
+if ( cd "$UPSTREAM_DIR" && export GIT_INDEX_FILE="$scratch_dir/index" \
+     && git read-tree "$TARGET" \
+     && for p in "$PATCH_DIR"/*.patch; do git apply --cached -3 "$p" || exit 1; done ) \
+     >/dev/null 2>&1; then
+  patched_tree=$( cd "$UPSTREAM_DIR" && GIT_INDEX_FILE="$scratch_dir/index" git write-tree ) \
+    || patched_tree=""
+fi
+rm -rf "$scratch_dir"
+
+if [[ -n "$patched_tree" ]]; then
+  # update-ref rather than reset --soft: a previous failed merge can leave
+  # unmerged entries, which reset --soft refuses and read-tree --reset discards.
+  # The refresh records content-identical files as clean so they are not rewritten.
+  ( cd "$UPSTREAM_DIR" \
+    && git update-ref --no-deref HEAD "$(git rev-parse "${TARGET}^{commit}")" \
+    && { git update-index -q --refresh >/dev/null 2>&1 || true; } \
+    && git read-tree --reset -u "$patched_tree" \
+    && git clean -fdq -e /codex-rs/target ) \
+    || fail "could not move $UPSTREAM_DIR onto the patched tree"
+  for p in "$PATCH_DIR"/*.patch; do note "applied ${p:t} (unchanged files left as they were)"; done
+else
+  # Drop any previous patch application so the merge starts from clean upstream.
+  ( cd "$UPSTREAM_DIR" && git reset --hard --quiet "$TARGET" && git clean -fdq -e /codex-rs/target ) \
+    || fail "could not reset $UPSTREAM_DIR to $TARGET"
+  for p in "$PATCH_DIR"/*.patch; do
+    if ! ( cd "$UPSTREAM_DIR" && git apply -3 "$p" ); then
+      conflicted=$( cd "$UPSTREAM_DIR" && git diff --name-only --diff-filter=U )
+      print -u2 ""
+      print -u2 "$SCRIPT_NAME: ${p:t} did not merge onto $TARGET."
+      if [[ -n "$conflicted" ]]; then
+        print -u2 "  Conflicting files:"
+        print -u2 "$conflicted" | sed 's/^/    /'
+        print -u2 "  The checkout is left in place with the conflicts, so you can resolve"
+        print -u2 "  them in $UPSTREAM_DIR, confirm it builds, and record the result:"
+        print -u2 "    mkdir -p patches/$TARGET"
+        print -u2 "    (cd upstream && git diff $TARGET -- codex-rs/) > patches/$TARGET/0001-boss-mode.patch"
+      fi
+      fail "upstream moved further than this patch can follow on its own"
     fi
-    fail "upstream moved further than this patch can follow on its own"
-  fi
-  note "applied ${p:t}"
-done
+    note "applied ${p:t}"
+  done
+fi
 
 boss_build_binary
 
