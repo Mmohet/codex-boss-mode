@@ -264,11 +264,9 @@ evidence updates the situation; it does not create a new goal by itself. Expand
 only when a newly unresolved constraint could change the result. When remaining
 detail cannot change the decision, stop and return any material uncertainty.
 
-Your final report is all the lead sees of your work when judging it. Quote the
-few lines the result actually rests on, as they are: the key logic you changed,
-the decisive output or source. Leave out the rest of the diff. Say a result
-holds only when a check proves it mechanically; otherwise say what you checked
-and what is still open.
+No one after you will look at the work itself: the lead sees only your report,
+and the user sees the result. Quote the few lines it rests on, and do not call
+it done beyond what you actually saw.
 """
 # Setting subagent_developer_instructions suppresses the stock subagent usage
 # hint, which carried the runtime and tool contract as well as the stock
