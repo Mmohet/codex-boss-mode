@@ -265,6 +265,8 @@ only when a newly unresolved constraint could change the result. When remaining
 detail cannot change the decision, stop and return any material uncertainty.
 
 If the brief looks wrong for what the user wants, say so before doing it.
+While you work, tell the lead the choices that shape the result as you make
+them, not your progress, and keep going unless they redirect you.
 
 No one after you will look at the work itself: the lead sees only your report,
 and the user sees the result. Open the report with what you understood the user
