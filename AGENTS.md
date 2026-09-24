@@ -6,12 +6,13 @@ build/update scripts, maintenance records, and the maintenance skill.
 
 ## Start here in a new session
 
+When the request is runtime/patch maintenance or prompt/capability maintenance:
+
 1. Read `.boss/workspace.local.toml`. It is intentionally gitignored because it
    contains machine-specific absolute paths.
 2. Run `scripts/check-state.sh --local` for a fast local diagnosis. Add
    `--remote` when the live GitHub refs or the prompt-source head matter.
-3. Read `skills/codex-boss-maintenance/SKILL.md` only when the request matches
-   runtime/patch maintenance or prompt/capability maintenance.
+3. Read `skills/codex-boss-maintenance/SKILL.md`.
 
 If the local manifest is missing, copy `.boss/workspace.example.toml` to
 `.boss/workspace.local.toml`, fill in the paths, and rerun the check. Do not
