@@ -2177,10 +2177,48 @@ index 25326c4d..b77c3ea6 100644
  const CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
  const CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index d5572f3c..cddc10d3 100644
+index d5572f3c..0d49ba8a 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -701,6 +701,15 @@ pub struct AgentsToml {
+@@ -459,6 +459,10 @@ pub struct ConfigToml {
+     /// Agent-related settings (thread limits, etc.).
+     pub agents: Option<AgentsToml>,
+ 
++    /// Boss Mode knobs and the model-facing text the Boss runtime writes, so
++    /// they can be tuned from the profile without rebuilding.
++    pub boss: Option<BossToml>,
++
+     /// Goal-related settings.
+     pub goals: Option<GoalsToml>,
+ 
+@@ -684,6 +688,26 @@ pub struct GoalsToml {
+     pub max_goal_token_budget: Option<NonZeroU64>,
+ }
+ 
++/// Boss Mode settings that would otherwise be compiled in.
++#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
++#[schemars(deny_unknown_fields)]
++pub struct BossToml {
++    /// Observation rounds Boss main may take in one turn: the first is free,
++    /// each later one needs a visible rationale first. Defaults to 2.
++    #[schemars(range(min = 0, max = 20))]
++    pub observation_rounds_per_turn: Option<u8>,
++    /// Newest technical tool output, in estimated tokens, that Boss main keeps
++    /// verbatim before older output is replaced by a placeholder. Defaults to 4000.
++    pub recent_evidence_tokens: Option<i64>,
++    /// Headings of the stock-prompt sections a Boss worker does not receive,
++    /// written exactly as they appear (for example `# Autonomy and persistence`).
++    pub worker_dropped_stock_sections: Option<Vec<String>>,
++    /// Replacement text for the model-facing strings the Boss runtime writes,
++    /// keyed by name (for example `tools.compact_agent.description`). A key that
++    /// is absent keeps the built-in text.
++    pub text: Option<BTreeMap<String, String>>,
++}
++
+ #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+ #[schemars(deny_unknown_fields)]
+ pub struct AgentsToml {
+@@ -701,6 +725,15 @@ pub struct AgentsToml {
      pub default_subagent_model: Option<String>,
      /// Default reasoning effort for spawned subagents when the spawn call does not select one.
      pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
@@ -2309,7 +2347,7 @@ index 57b5daff..df4ad11e 100644
  
  #[derive(Debug, Clone, PartialEq)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index e53a95e2..f91fddb1 100644
+index e53a95e2..3a24c81f 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -36,6 +36,13 @@
@@ -2340,7 +2378,47 @@ index e53a95e2..f91fddb1 100644
          }
        },
        "type": "object"
-@@ -688,6 +702,21 @@
+@@ -459,6 +473,39 @@
+       ],
+       "type": "object"
+     },
++    "BossToml": {
++      "additionalProperties": false,
++      "description": "Boss Mode settings that would otherwise be compiled in.",
++      "properties": {
++        "observation_rounds_per_turn": {
++          "description": "Observation rounds Boss main may take in one turn: the first is free, each later one needs a visible rationale first. Defaults to 2.",
++          "format": "uint8",
++          "maximum": 20.0,
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "recent_evidence_tokens": {
++          "description": "Newest technical tool output, in estimated tokens, that Boss main keeps verbatim before older output is replaced by a placeholder. Defaults to 4000.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "text": {
++          "additionalProperties": {
++            "type": "string"
++          },
++          "description": "Replacement text for the model-facing strings the Boss runtime writes, keyed by name (for example `tools.compact_agent.description`). A key that is absent keeps the built-in text.",
++          "type": "object"
++        },
++        "worker_dropped_stock_sections": {
++          "description": "Headings of the stock-prompt sections a Boss worker does not receive, written exactly as they appear (for example `# Autonomy and persistence`).",
++          "items": {
++            "type": "string"
++          },
++          "type": "array"
++        }
++      },
++      "type": "object"
++    },
+     "BrowserUseConfigToml": {
+       "additionalProperties": false,
+       "properties": {
+@@ -688,6 +735,21 @@
              "bedrock_setup_wizard": {
                "type": "boolean"
              },
@@ -2362,7 +2440,7 @@ index e53a95e2..f91fddb1 100644
              "browser_use": {
                "type": "boolean"
              },
-@@ -1030,6 +1059,9 @@
+@@ -1030,6 +1092,9 @@
              "step_model_switching": {
                "type": "boolean"
              },
@@ -2372,7 +2450,22 @@ index e53a95e2..f91fddb1 100644
              "telepathy": {
                "type": "boolean"
              },
-@@ -6342,6 +6374,21 @@
+@@ -6207,6 +6272,14 @@
+       "minimum": 0.0,
+       "type": "integer"
+     },
++    "boss": {
++      "allOf": [
++        {
++          "$ref": "#/definitions/BossToml"
++        }
++      ],
++      "description": "Boss Mode knobs and the model-facing text the Boss runtime writes, so they can be tuned from the profile without rebuilding."
++    },
+     "browser_use": {
+       "$ref": "#/definitions/BrowserUseConfigToml"
+     },
+@@ -6342,6 +6415,21 @@
          "bedrock_setup_wizard": {
            "type": "boolean"
          },
@@ -2394,7 +2487,7 @@ index e53a95e2..f91fddb1 100644
          "browser_use": {
            "type": "boolean"
          },
-@@ -6684,6 +6731,9 @@
+@@ -6684,6 +6772,9 @@
          "step_model_switching": {
            "type": "boolean"
          },
@@ -2405,7 +2498,7 @@ index e53a95e2..f91fddb1 100644
            "type": "boolean"
          },
 diff --git a/codex-rs/core/src/agent/child_config.rs b/codex-rs/core/src/agent/child_config.rs
-index ca2f7d91..7ebdbebc 100644
+index ca2f7d91..cdcd3b64 100644
 --- a/codex-rs/core/src/agent/child_config.rs
 +++ b/codex-rs/core/src/agent/child_config.rs
 @@ -8,10 +8,13 @@ use crate::agent::role::apply_role_to_config;
@@ -2497,29 +2590,34 @@ index ca2f7d91..7ebdbebc 100644
          .map_err(|err| format!("permission_profile is invalid: {err}"))?;
      Ok(())
  }
-@@ -203,7 +237,9 @@ async fn apply_requested_spawn_agent_model_overrides(
+@@ -203,7 +237,14 @@ async fn apply_requested_spawn_agent_model_overrides(
      let turn = step_context.turn.as_ref();
      let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
      let requested_reasoning_effort = requested_reasoning_effort
 -        .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());
 +        .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone())
-+        .or_else(|| turn.config.agent_subagent_reasoning_efforts.first().cloned())
++        .or_else(|| {
++            turn.config
++                .agent_subagent_reasoning_efforts
++                .first()
++                .cloned()
++        })
 +        .map(|effort| turn.config.allowed_subagent_reasoning_effort(effort));
      if requested_model.is_none() && requested_reasoning_effort.is_none() {
          return Ok(());
      }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 33bd450b..a69d932a 100644
+index 33bd450b..079e0692 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -32,6 +32,7 @@ use codex_history::RolloutItem;
- use codex_protocol::AgentPath;
- use codex_protocol::SessionId;
- use codex_protocol::ThreadId;
+@@ -40,6 +40,7 @@ use codex_protocol::items::TurnItem;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::MessagePhase;
+ use codex_protocol::models::ResponseItem;
 +use codex_protocol::openai_models::ReasoningEffort;
- use codex_protocol::error::CodexErr;
- use codex_protocol::error::CodexErrorDetails;
- use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::HasLegacyEvent;
 @@ -57,6 +58,7 @@ use codex_protocol::turn_input::CyberAccessProgram;
  use codex_protocol::user_input::UserInput;
  use codex_thread_store::LoadThreadHistoryParams;
@@ -2528,14 +2626,19 @@ index 33bd450b..a69d932a 100644
  use serde::Serialize;
  use std::collections::HashMap;
  use std::collections::HashSet;
-@@ -72,11 +74,17 @@ pub(crate) use self::delivery::MessageDeliveryError;
- pub(crate) use self::delivery::MessageDeliveryMode;
- pub(crate) use self::execution::AgentExecutionGuard;
- use self::execution::AgentExecutionLimiter;
+@@ -67,16 +69,22 @@ use tokio::sync::watch;
+ use tracing::warn;
+ use uuid::Uuid;
+ 
 +pub(crate) use self::compact::AgentCompactError;
 +pub(crate) use self::compact::AgentCompactOutcome;
+ pub(crate) use self::delivery::AgentMessage;
+ pub(crate) use self::delivery::MessageDeliveryError;
+ pub(crate) use self::delivery::MessageDeliveryMode;
 +pub(crate) use self::effort::AgentEffortError;
 +pub(crate) use self::effort::AgentEffortOutcome;
+ pub(crate) use self::execution::AgentExecutionGuard;
+ use self::execution::AgentExecutionLimiter;
  pub(crate) use self::interrupt::AgentInterruptError;
  pub(crate) use self::interrupt::AgentInterruptOutcome;
  use self::residency::V2Residency;
@@ -2546,7 +2649,7 @@ index 33bd450b..a69d932a 100644
  mod execution;
  mod interrupt;
  mod legacy;
-@@ -118,7 +126,88 @@ pub(crate) struct LiveAgent {
+@@ -118,7 +126,92 @@ pub(crate) struct LiveAgent {
  #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
  pub(crate) struct ListedAgent {
      pub(crate) agent_name: String,
@@ -2592,7 +2695,11 @@ index 33bd450b..a69d932a 100644
 +/// high reading here is also a warning that the runtime is about to compact on
 +/// its own — after the thread has already paid for several turns at that size.
 +async fn context_used_percent(thread: &crate::CodexThread) -> Option<u8> {
-+    let window = thread.session.token_usage_info().await?.model_context_window?;
++    let window = thread
++        .session
++        .token_usage_info()
++        .await?
++        .model_context_window?;
 +    if window <= 0 {
 +        return None;
 +    }
@@ -2636,7 +2743,7 @@ index 33bd450b..a69d932a 100644
  }
  
  /// Control-plane handle for multi-agent operations.
-@@ -502,49 +591,50 @@ impl AgentControl {
+@@ -502,49 +595,50 @@ impl AgentControl {
                          .as_ref()
                          .map(|path| path.name().to_string())
                          .unwrap_or_else(|| thread_id.to_string());
@@ -2718,7 +2825,7 @@ index 33bd450b..a69d932a 100644
              let line_bytes = "    \n".len() + line.len();
              if rendered_bytes + line_bytes <= MAX_ENVIRONMENT_SUBAGENT_BYTES {
                  rendered_bytes += line_bytes;
-@@ -585,16 +675,40 @@ impl AgentControl {
+@@ -585,16 +679,40 @@ impl AgentControl {
          });
  
          let root_path = AgentPath::root();
@@ -2761,7 +2868,7 @@ index 33bd450b..a69d932a 100644
              });
          }
  
-@@ -608,24 +722,131 @@ impl AgentControl {
+@@ -608,22 +726,131 @@ impl AgentControl {
              {
                  continue;
              }
@@ -2866,7 +2973,10 @@ index 33bd450b..a69d932a 100644
 +    /// colleagues have just handed their work back, and the compaction happens
 +    /// while the user reads the answer. A colleague still working is left alone,
 +    /// since compacting it would replace its turn.
-+    pub(crate) async fn compact_idle_colleagues_above(&self, threshold_percent: u8) -> Vec<ThreadId> {
++    pub(crate) async fn compact_idle_colleagues_above(
++        &self,
++        threshold_percent: u8,
++    ) -> Vec<ThreadId> {
 +        let Ok(state) = self.upgrade() else {
 +            return Vec::new();
 +        };
@@ -2894,11 +3004,8 @@ index 33bd450b..a69d932a 100644
 +        compacted
      }
  
-+
      /// Starts a detached watcher for sub-agents spawned from another thread.
-     ///
-     /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and
-@@ -833,10 +1054,45 @@ impl AgentControl {
+@@ -833,10 +1060,45 @@ impl AgentControl {
          &self,
          parent_thread_id: ThreadId,
      ) -> CodexResult<Vec<(ThreadId, AgentMetadata)>> {
@@ -2948,7 +3055,7 @@ index 33bd450b..a69d932a 100644
      }
  
      async fn live_thread_spawn_children(
-@@ -909,6 +1165,20 @@ impl AgentControl {
+@@ -909,6 +1171,20 @@ impl AgentControl {
          &self,
          root_thread_id: ThreadId,
      ) -> CodexResult<Vec<ThreadId>> {
@@ -3189,10 +3296,10 @@ index 034fa0ad..7a73b139 100644
          let context = AgentCommunicationContext::new(kind, caller);
 diff --git a/codex-rs/core/src/agent/control/effort.rs b/codex-rs/core/src/agent/control/effort.rs
 new file mode 100644
-index 00000000..727a4b07
+index 00000000..a2de1734
 --- /dev/null
 +++ b/codex-rs/core/src/agent/control/effort.rs
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,84 @@
 +//! Moves a spawned colleague's reasoning effort after it has started.
 +//!
 +//! Effort used to be fixed at spawn because changing it later made the provider
@@ -3261,7 +3368,11 @@ index 00000000..727a4b07
 +                    .to_string(),
 +            )
 +        })?;
-+        let previous_effort = thread.session.thread_settings_snapshot().await.reasoning_effort;
++        let previous_effort = thread
++            .session
++            .thread_settings_snapshot()
++            .await
++            .reasoning_effort;
 +        let running_turn = thread
 +            .session
 +            .retune_effort(effort, /*future_turns*/ true)
@@ -3367,7 +3478,7 @@ index 4e8d9bff..1dd8c3cc 100644
                      && matches!(
                          &*item,
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index c2bd787c..19283b3a 100644
+index c2bd787c..a8fc6236 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -935,6 +935,22 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
@@ -3393,7 +3504,7 @@ index c2bd787c..19283b3a 100644
      if matches!(route, V2ReloadRoute::NestedParent) {
          let reloaded_turn = reloaded_child.session.new_default_turn().await;
          assert_eq!(
-@@ -3624,6 +3640,154 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
+@@ -3624,6 +3640,157 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
      ));
  }
  
@@ -3426,7 +3537,10 @@ index c2bd787c..19283b3a 100644
 +    (thread_id, thread)
 +}
 +
-+fn turn_complete(turn: &crate::session::turn_context::TurnContext, last_agent_message: Option<&str>) -> EventMsg {
++fn turn_complete(
++    turn: &crate::session::turn_context::TurnContext,
++    last_agent_message: Option<&str>,
++) -> EventMsg {
 +    EventMsg::TurnComplete(TurnCompleteEvent {
 +        turn_id: turn.sub_id.clone(),
 +        started_at: None,
@@ -3549,7 +3663,7 @@ index c2bd787c..19283b3a 100644
  async fn completion_watcher_notifies_parent_when_child_is_missing() {
      let harness = AgentControlHarness::new().await;
 diff --git a/codex-rs/core/src/apply_patch.rs b/codex-rs/core/src/apply_patch.rs
-index 9b3c7a2d..125f1051 100644
+index 9b3c7a2d..ce52d3d4 100644
 --- a/codex-rs/core/src/apply_patch.rs
 +++ b/codex-rs/core/src/apply_patch.rs
 @@ -4,6 +4,7 @@ use crate::safety::SafetyCheck;
@@ -3560,27 +3674,89 @@ index 9b3c7a2d..125f1051 100644
  use crate::tools::sandboxing::ExecApprovalRequirement;
  use codex_apply_patch::ApplyPatchAction;
  use codex_apply_patch::ApplyPatchFileChange;
-@@ -29,6 +30,18 @@ pub(crate) fn prepare_apply_patch(
+@@ -29,6 +30,19 @@ pub(crate) fn prepare_apply_patch(
      sandbox_route: PatchSandboxRoute,
      action: ApplyPatchAction,
  ) -> Result<ApplyPatchRuntimeInvocation, FunctionCallError> {
 +    if boss_main_execution_isolation_active(&step_context.turn) {
-+        return Err(FunctionCallError::RespondToModel(
-+            "Boss Main does not modify local files directly; delegate substantial execution to a Worker"
-+                .to_string(),
-+        ));
++        return Err(FunctionCallError::RespondToModel(crate::boss_text::text(
++            "gate.main_file_edit",
++            "Boss Main does not modify local files directly; delegate substantial execution to a Worker",
++        )));
 +    }
 +    if crate::tools::boss_side_conversation_active(&step_context.turn) {
-+        return Err(FunctionCallError::RespondToModel(
-+            "This side conversation is read-only and does not modify files".to_string(),
-+        ));
++        return Err(FunctionCallError::RespondToModel(crate::boss_text::text(
++            "gate.side_file_edit",
++            "This side conversation is read-only and does not modify files",
++        )));
 +    }
 +
      match assess_patch_safety(
          &action,
          step_context.settings.approval_policy(),
+diff --git a/codex-rs/core/src/boss_text.rs b/codex-rs/core/src/boss_text.rs
+new file mode 100644
+index 00000000..ade892bd
+--- /dev/null
++++ b/codex-rs/core/src/boss_text.rs
+@@ -0,0 +1,32 @@
++//! Model-facing text the Boss runtime writes, with replacements from the
++//! profile's `[boss.text]` table.
++//!
++//! Tool descriptions, message envelopes and gate replies are built in places
++//! that never see a `Config`, so the replacements live in one process-wide map
++//! that loading a profile with a `[boss]` table fills. Every call site passes
++//! its built-in text, which is what a key without a replacement gets.
++
++use std::collections::BTreeMap;
++use std::sync::RwLock;
++
++static REPLACEMENTS: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
++
++/// Replaces every earlier replacement with `replacements`.
++pub(crate) fn install(replacements: BTreeMap<String, String>) {
++    if let Ok(mut current) = REPLACEMENTS.write() {
++        *current = replacements;
++    }
++}
++
++/// The text for `key`: the profile's replacement when it has one, otherwise `built_in`.
++pub(crate) fn text(key: &str, built_in: &str) -> String {
++    REPLACEMENTS
++        .read()
++        .ok()
++        .and_then(|current| current.get(key).cloned())
++        .unwrap_or_else(|| built_in.to_string())
++}
++
++#[cfg(test)]
++#[path = "boss_text_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/boss_text_tests.rs b/codex-rs/core/src/boss_text_tests.rs
+new file mode 100644
+index 00000000..a8f3a293
+--- /dev/null
++++ b/codex-rs/core/src/boss_text_tests.rs
+@@ -0,0 +1,17 @@
++use super::install;
++use super::text;
++use std::collections::BTreeMap;
++
++#[test]
++fn a_profile_replacement_wins_and_other_keys_keep_their_built_in_text() {
++    install(BTreeMap::from([(
++        "test.boss_text.replaced".to_string(),
++        "from the profile".to_string(),
++    )]));
++
++    assert_eq!(
++        text("test.boss_text.replaced", "built in"),
++        "from the profile"
++    );
++    assert_eq!(text("test.boss_text.untouched", "built in"), "built in");
++}
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 7be3235f..cba425dc 100644
+index 7be3235f..b5a4208e 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -2054,6 +2054,10 @@ respect_system_proxy = true
@@ -3719,10 +3895,58 @@ index 7be3235f..cba425dc 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9348,6 +9463,56 @@ job_max_runtime_seconds = 900
+@@ -9348,6 +9463,104 @@ job_max_runtime_seconds = 900
      );
  }
  
++#[tokio::test]
++async fn boss_table_sets_runtime_knobs_and_absent_keys_keep_their_defaults() -> std::io::Result<()>
++{
++    let codex_home = TempDir::new()?;
++    let configured = Config::load_from_base_config_with_overrides(
++        ConfigToml {
++            boss: Some(codex_config::config_toml::BossToml {
++                observation_rounds_per_turn: Some(3),
++                recent_evidence_tokens: Some(9_000),
++                worker_dropped_stock_sections: Some(vec!["# Personality".to_string()]),
++                text: None,
++            }),
++            ..Default::default()
++        },
++        ConfigOverrides::default(),
++        codex_home.abs(),
++    )
++    .await?;
++    assert_eq!(
++        (
++            configured.boss_observation_rounds_per_turn,
++            configured.boss_recent_evidence_tokens,
++            configured.boss_worker_dropped_stock_sections,
++        ),
++        (3, 9_000, vec!["# Personality".to_string()])
++    );
++
++    let defaults = Config::load_from_base_config_with_overrides(
++        ConfigToml::default(),
++        ConfigOverrides::default(),
++        codex_home.abs(),
++    )
++    .await?;
++    assert_eq!(
++        (
++            defaults.boss_observation_rounds_per_turn,
++            defaults.boss_recent_evidence_tokens,
++            defaults.boss_worker_dropped_stock_sections.len(),
++        ),
++        (
++            DEFAULT_BOSS_OBSERVATION_ROUNDS_PER_TURN,
++            DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS,
++            DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS.len(),
++        )
++    );
++    Ok(())
++}
++
 +#[tokio::test]
 +async fn subagent_efforts_keep_listed_levels_and_replace_the_rest() -> std::io::Result<()> {
 +    let codex_home = TempDir::new()?;
@@ -3776,7 +4000,7 @@ index 7be3235f..cba425dc 100644
  #[tokio::test]
  async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
      let codex_home = TempDir::new()?;
-@@ -9357,6 +9522,8 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+@@ -9357,6 +9570,8 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
              max_depth: Some(2),
              default_subagent_model: Some("gpt-5.6-terra".to_string()),
              default_subagent_reasoning_effort: Some(ReasoningEffort::High),
@@ -3785,7 +4009,7 @@ index 7be3235f..cba425dc 100644
              interrupt_message: Some(false),
              ..Default::default()
          }),
-@@ -9421,6 +9588,8 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
+@@ -9421,6 +9636,8 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -3794,7 +4018,7 @@ index 7be3235f..cba425dc 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9467,6 +9636,8 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
+@@ -9467,6 +9684,8 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -3803,7 +4027,7 @@ index 7be3235f..cba425dc 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9507,6 +9678,8 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
+@@ -9507,6 +9726,8 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -3812,7 +4036,7 @@ index 7be3235f..cba425dc 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9547,6 +9720,8 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
+@@ -9547,6 +9768,8 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -3821,7 +4045,7 @@ index 7be3235f..cba425dc 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -11836,7 +12011,7 @@ max_concurrent_threads_per_session = 17
+@@ -11836,7 +12059,7 @@ max_concurrent_threads_per_session = 17
      .expect("multi-agent v2 config should parse");
  
      let config = resolve_multi_agent_v2_config(&config_toml);
@@ -3830,7 +4054,7 @@ index 7be3235f..cba425dc 100644
      let messages = ResolvedModelMessages::bundled().multi_agent();
      assert!(config.wait_agent_enabled);
      for wait_agent_enabled in [true, false] {
-@@ -11849,7 +12024,7 @@ max_concurrent_threads_per_session = 17
+@@ -11849,7 +12072,7 @@ max_concurrent_threads_per_session = 17
              let hint = hint.expect("default usage hints should be present").body();
              assert!(hint.contains(concurrency_guidance));
              assert_eq!(
@@ -3839,18 +4063,21 @@ index 7be3235f..cba425dc 100644
                  wait_agent_enabled
              );
          }
-@@ -11938,9 +12113,8 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+@@ -11937,12 +12160,7 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+         let model_override_guidance = hint
              .strip_prefix(hint_without_model_overrides.as_str())
              .expect("model-override guidance should extend the base usage hint");
-         for required_fragment in [
+-        for required_fragment in [
 -            "Full-history forks",
-+            "full-history fork",
-             "`fork_turns`",
+-            "`fork_turns`",
 -            "`model`",
-             "`reasoning_effort`",
-         ] {
+-            "`reasoning_effort`",
+-        ] {
++        for required_fragment in ["full-history fork", "`fork_turns`", "`reasoning_effort`"] {
              assert!(
-@@ -13113,3 +13287,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
+                 model_override_guidance.contains(required_fragment),
+                 "model-override guidance should contain {required_fragment}"
+@@ -13113,3 +13331,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
  
      Ok(())
  }
@@ -3954,7 +4181,7 @@ index 7be3235f..cba425dc 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 2c17d687..8a10efac 100644
+index 2c17d687..390b2f54 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -646,6 +646,16 @@ pub struct Config {
@@ -3974,7 +4201,7 @@ index 2c17d687..8a10efac 100644
      /// Whether config explicitly selected named permissions profiles instead
      /// of the legacy `sandbox_mode` syntax.
      pub explicit_permission_profile_mode: bool,
-@@ -898,6 +908,13 @@ pub struct Config {
+@@ -898,6 +908,22 @@ pub struct Config {
      /// Default reasoning effort for spawned subagents when the spawn call does not select one.
      pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
  
@@ -3985,10 +4212,42 @@ index 2c17d687..8a10efac 100644
 +    /// agent finishes a turn.
 +    pub agent_compact_idle_colleagues_above_percent: Option<u8>,
 +
++    /// Observation rounds Boss main may take in one turn; see `[boss]`.
++    pub boss_observation_rounds_per_turn: u8,
++
++    /// Newest technical output Boss main keeps verbatim, in estimated tokens.
++    pub boss_recent_evidence_tokens: i64,
++
++    /// Stock-prompt section headings a Boss worker does not receive.
++    pub boss_worker_dropped_stock_sections: Vec<String>,
++
      /// Whether to record a model-visible message when an agent turn is interrupted.
      pub agent_interrupt_message_enabled: bool,
  
-@@ -1524,6 +1541,24 @@ impl Config {
+@@ -1519,11 +1545,47 @@ impl ConfigBuilder {
+     }
+ }
+ 
++/// Boss main's observation rounds per turn when the profile does not set them:
++/// one free round and one that needs a visible rationale.
++pub(crate) const DEFAULT_BOSS_OBSERVATION_ROUNDS_PER_TURN: u8 = 2;
++
++/// Newest technical output Boss main keeps verbatim when the profile does not say.
++pub(crate) const DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS: i64 = 4_000;
++
++/// Stock sections that assume the user is out of reach: how far to persist
++/// unasked, and how to narrate and report to someone who is not there. A Boss
++/// worker's user is the lead, reachable at any moment, so these turn it into a
++/// solo runner that reports back instead of someone the work is talked through
++/// with. The permission section stays: the lead still grants authority.
++pub(crate) const DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS: &[&str] = &[
++    "# Autonomy and persistence",
++    "## Intermediate commentary",
++    "## Final answer",
++];
++
+ impl Config {
+     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
          &self.sqlite
      }
  
@@ -4013,7 +4272,7 @@ index 2c17d687..8a10efac 100644
      /// Resolves the configured, reviewer-catalog, or bundled Guardian policy.
      pub fn resolve_guardian_policy<'a>(
          &'a self,
-@@ -1627,6 +1662,7 @@ impl Config {
+@@ -1627,6 +1689,7 @@ impl Config {
                      Some(BaseInstructionsProvenance::Model { .. })
                  )
              }),
@@ -4021,7 +4280,7 @@ index 2c17d687..8a10efac 100644
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
          }
-@@ -1644,7 +1680,10 @@ impl Config {
+@@ -1644,7 +1707,10 @@ impl Config {
          } else {
              OutboundProxyPolicy::ReqwestDefault
          };
@@ -4033,7 +4292,7 @@ index 2c17d687..8a10efac 100644
          if self.features.enabled(Feature::Psp) {
              factory.with_chatgpt_cookies([HeaderValue::from_static("oai-chat-psp=true")])
          } else {
-@@ -2973,17 +3012,8 @@ pub fn resolve_bootstrap_respect_system_proxy(
+@@ -2973,17 +3039,8 @@ pub fn resolve_bootstrap_respect_system_proxy(
      cfg: &ConfigToml,
      feature_requirements: Option<&Sourced<FeatureRequirementsToml>>,
  ) -> std::io::Result<bool> {
@@ -4053,7 +4312,7 @@ index 2c17d687..8a10efac 100644
  }
  
  /// Resolves auth route settings for the initial cloud-config bootstrap.
-@@ -3000,14 +3030,28 @@ pub fn resolve_bootstrap_http_client_factory(
+@@ -3000,14 +3057,28 @@ pub fn resolve_bootstrap_http_client_factory(
      cfg: &ConfigToml,
      feature_requirements: Option<&Sourced<FeatureRequirementsToml>>,
  ) -> std::io::Result<HttpClientFactory> {
@@ -4090,7 +4349,7 @@ index 2c17d687..8a10efac 100644
  }
  
  pub(crate) fn resolve_web_search_mode_for_turn(
-@@ -3799,6 +3843,15 @@ impl Config {
+@@ -3799,6 +3870,32 @@ impl Config {
              .agents
              .as_ref()
              .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
@@ -4103,10 +4362,27 @@ index 2c17d687..8a10efac 100644
 +            .agents
 +            .as_ref()
 +            .and_then(|agents| agents.compact_idle_colleagues_above_percent);
++        let boss = cfg.boss.clone().unwrap_or_default();
++        if let Some(text) = boss.text {
++            crate::boss_text::install(text);
++        }
++        let boss_observation_rounds_per_turn = boss
++            .observation_rounds_per_turn
++            .unwrap_or(DEFAULT_BOSS_OBSERVATION_ROUNDS_PER_TURN);
++        let boss_recent_evidence_tokens = boss
++            .recent_evidence_tokens
++            .unwrap_or(DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS);
++        let boss_worker_dropped_stock_sections =
++            boss.worker_dropped_stock_sections.unwrap_or_else(|| {
++                DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS
++                    .iter()
++                    .map(|heading| (*heading).to_string())
++                    .collect()
++            });
          let agent_interrupt_message_enabled = cfg
              .agents
              .as_ref()
-@@ -3902,7 +3955,29 @@ impl Config {
+@@ -3902,7 +3999,29 @@ impl Config {
          let base_instructions_provenance = base_instructions
              .as_ref()
              .map(|_| BaseInstructionsProvenance::Custom);
@@ -4137,7 +4413,7 @@ index 2c17d687..8a10efac 100644
          let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
          let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
          let include_collaboration_mode_instructions =
-@@ -4179,6 +4254,8 @@ impl Config {
+@@ -4179,6 +4298,8 @@ impl Config {
                  windows_sandbox_type,
                  windows_sandbox_private_desktop,
              },
@@ -4146,21 +4422,24 @@ index 2c17d687..8a10efac 100644
              explicit_permission_profile_mode,
              custom_permission_profiles,
              approvals_reviewer: constrained_approvals_reviewer.value(),
-@@ -4241,6 +4318,8 @@ impl Config {
+@@ -4241,6 +4362,11 @@ impl Config {
              agent_max_threads,
              agent_default_subagent_model,
              agent_default_subagent_reasoning_effort,
 +            agent_subagent_reasoning_efforts,
 +            agent_compact_idle_colleagues_above_percent,
++            boss_observation_rounds_per_turn,
++            boss_recent_evidence_tokens,
++            boss_worker_dropped_stock_sections,
              agent_max_depth,
              agent_roles,
              max_goal_token_budget: cfg
 diff --git a/codex-rs/core/src/context/connector_inventory.rs b/codex-rs/core/src/context/connector_inventory.rs
 new file mode 100644
-index 00000000..c068aaea
+index 00000000..b82db706
 --- /dev/null
 +++ b/codex-rs/core/src/context/connector_inventory.rs
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,59 @@
 +use super::ContextualUserFragment;
 +use codex_protocol::models::ContentItemKind;
 +
@@ -4201,7 +4480,8 @@ index 00000000..c068aaea
 +    }
 +
 +    fn body(&self) -> String {
-+        let mut body = String::from(
++        let mut body = crate::boss_text::text(
++            "connectors.intro",
 +            "\nSources you can reach in this session. Each description is the one the \
 +             source provides for itself.\n",
 +        );
@@ -4220,15 +4500,20 @@ index 00000000..c068aaea
 +    }
 +}
 diff --git a/codex-rs/core/src/context/inter_agent_completion_message.rs b/codex-rs/core/src/context/inter_agent_completion_message.rs
-index ec04c4f1..96c2735f 100644
+index ec04c4f1..5824a3ac 100644
 --- a/codex-rs/core/src/context/inter_agent_completion_message.rs
 +++ b/codex-rs/core/src/context/inter_agent_completion_message.rs
-@@ -39,7 +39,7 @@ impl ContextualUserFragment for InterAgentCompletionMessage {
+@@ -38,8 +38,12 @@ impl ContextualUserFragment for InterAgentCompletionMessage {
+     }
  
      fn body(&self) -> String {
++        let note = crate::boss_text::text(
++            "envelope.final_answer_note",
++            "Turn state: idle; colleague remains available.\nThis is the colleague's report; the user will see only the result.",
++        );
          format!(
 -            "Message Type: FINAL_ANSWER\nTask name: {}\nSender: {}\nPayload:\n{}",
-+            "Message Type: FINAL_ANSWER\nColleague: {}\nSender: {}\nTurn state: idle; colleague remains available.\nThis is the colleague's report; the user will see only the result.\nPayload:\n{}",
++            "Message Type: FINAL_ANSWER\nColleague: {}\nSender: {}\n{note}\nPayload:\n{}",
              self.task_name, self.sender, self.payload,
          )
      }
@@ -4352,17 +4637,15 @@ index ef03b155..250187ce 100644
  pub(crate) use environments_instructions::EnvironmentsInstructionsState;
 diff --git a/codex-rs/core/src/context_manager/boss_projection.rs b/codex-rs/core/src/context_manager/boss_projection.rs
 new file mode 100644
-index 00000000..84c8e2a5
+index 00000000..c7c76fea
 --- /dev/null
 +++ b/codex-rs/core/src/context_manager/boss_projection.rs
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,100 @@
 +//! Request-only evidence aging. The stored conversation is never rewritten.
 +use super::estimate_item_token_count;
 +use codex_protocol::models::FunctionCallOutputBody;
 +use codex_protocol::models::ResponseItem;
 +use std::collections::HashSet;
-+
-+const RECENT_EVIDENCE_TOKENS: i64 = 4_000;
 +
 +/// Keep natural-language context when seeding a Boss worker, including commentary.
 +pub(crate) fn durable_worker_item(item: &ResponseItem) -> bool {
@@ -4372,7 +4655,9 @@ index 00000000..84c8e2a5
 +    )
 +}
 +
-+pub(crate) fn project(input: &mut [ResponseItem]) {
++/// Replaces technical tool output older than the newest `recent_evidence_tokens`
++/// of it with a placeholder that says how to get it back.
++pub(crate) fn project(input: &mut [ResponseItem], recent_evidence_tokens: i64) {
 +    // Unknown tools stay verbatim. Classify tool identity, never output keywords.
 +    let technical_calls: HashSet<String> = input
 +        .iter()
@@ -4439,12 +4724,16 @@ index 00000000..84c8e2a5
 +            _ => continue,
 +        };
 +        used = used.saturating_add(tokens);
-+        if index < fresh_start && used > RECENT_EVIDENCE_TOKENS {
-+            output.body = FunctionCallOutputBody::Text(format!(
-+                "[Earlier technical output omitted from active context. Call ID: {call_id}. \
-+                 Original output remains in this thread's session log; reopen by call ID \
-+                 or rerun the tool call above if needed.]"
-+            ));
++        if index < fresh_start && used > recent_evidence_tokens {
++            output.body = FunctionCallOutputBody::Text(
++                crate::boss_text::text(
++                    "evidence.omitted_placeholder",
++                    "[Earlier technical output omitted from active context. Call ID: {call_id}. \
++                     Original output remains in this thread's session log; reopen by call ID \
++                     or rerun the tool call above if needed.]",
++                )
++                .replace("{call_id}", call_id),
++            );
 +        }
 +    }
 +}
@@ -4454,10 +4743,10 @@ index 00000000..84c8e2a5
 +mod tests;
 diff --git a/codex-rs/core/src/context_manager/boss_projection_tests.rs b/codex-rs/core/src/context_manager/boss_projection_tests.rs
 new file mode 100644
-index 00000000..d25b0cb8
+index 00000000..8c999331
 --- /dev/null
 +++ b/codex-rs/core/src/context_manager/boss_projection_tests.rs
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,88 @@
 +use super::*;
 +use pretty_assertions::assert_eq;
 +use serde_json::json;
@@ -4501,7 +4790,10 @@ index 00000000..d25b0cb8
 +        output("new-b", "Second parallel result"),
 +    ];
 +    let mut projected = original.clone();
-+    project(&mut projected);
++    project(
++        &mut projected,
++        crate::config::DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS,
++    );
 +    let ResponseItem::FunctionCallOutput {
 +        call_id,
 +        output: payload,
@@ -4527,7 +4819,10 @@ index 00000000..d25b0cb8
 +        message("developer"), // Runtime context injection does not mark results as observed.
 +    ];
 +    let expected = large_batch.clone();
-+    project(&mut large_batch);
++    project(
++        &mut large_batch,
++        crate::config::DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS,
++    );
 +    assert_eq!(large_batch, expected);
 +
 +    let worker: Vec<_> = original
@@ -4562,8 +4857,20 @@ index 8f3a347d..1916460a 100644
  mod history;
  mod normalize;
  pub(crate) mod updates;
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index ea8e1b29..b0413b9c 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -53,6 +53,7 @@ pub use session::turn_context::TurnContext;
+ mod agent;
+ mod agent_communication;
+ mod attestation;
++pub(crate) mod boss_text;
+ mod codex_delegate;
+ mod command_canonicalization;
+ pub mod config;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index c242c83c..eed14248 100644
+index c242c83c..956139de 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -507,6 +507,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
@@ -4647,7 +4954,7 @@ index c242c83c..eed14248 100644
          let isolation = thread_extension_init
              .get::<codex_extension_api::SessionIsolation>()
              .map(|policy| *policy)
-@@ -739,12 +797,48 @@ impl Session {
+@@ -739,12 +797,50 @@ impl Session {
          let history_mode = conversation_history.get_history_mode(
              requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
          );
@@ -4683,8 +4990,10 @@ index c242c83c..eed14248 100644
 +            let stock_instructions = models_manager
 +                .get_model_info(model.as_str(), &stock_overrides)
 +                .await;
-+            let stock_instructions =
-+                boss_worker_stock_instructions(&render_model_instructions(&stock_instructions));
++            let stock_instructions = boss_worker_stock_instructions(
++                &render_model_instructions(&stock_instructions),
++                &config.boss_worker_dropped_stock_sections,
++            );
 +            strip_boss_stock_instructions(
 +                &mut base_instructions,
 +                config.boss_hybrid_stock_instructions.as_deref(),
@@ -4697,7 +5006,7 @@ index c242c83c..eed14248 100644
          // Dynamic tools are defined at thread start and persisted in rollout session metadata.
          let dynamic_tools = if dynamic_tools.is_empty() {
              conversation_history.get_dynamic_tools().unwrap_or_default()
-@@ -947,6 +1041,75 @@ impl Session {
+@@ -947,6 +1043,69 @@ impl Session {
      }
  }
  
@@ -4714,22 +5023,14 @@ index c242c83c..eed14248 100644
 +    }
 +}
 +
-+/// Stock sections that assume the user is out of reach: how far to persist
-+/// unasked, and how to narrate and report to someone who is not there. A Boss
-+/// worker's user is the lead, reachable at any moment, so these turn it into a
-+/// solo runner that reports back instead of someone the work is talked through
-+/// with. The permission section stays: the lead still grants authority.
-+const BOSS_WORKER_DROPPED_STOCK_SECTIONS: &[&str] = &[
-+    "# Autonomy and persistence",
-+    "## Intermediate commentary",
-+    "## Final answer",
-+];
-+
 +/// The stock instructions a Boss worker keeps: everything about how the model
-+/// uses its tools and environment, without the sections that define its
-+/// relationship to a user. A section runs until the next heading of the same
-+/// or a higher level.
-+pub(crate) fn boss_worker_stock_instructions(stock_instructions: &str) -> String {
++/// uses its tools and environment, without the `dropped_sections` that define
++/// its relationship to a user. A section runs until the next heading of the
++/// same or a higher level.
++pub(crate) fn boss_worker_stock_instructions(
++    stock_instructions: &str,
++    dropped_sections: &[String],
++) -> String {
 +    let mut kept = Vec::new();
 +    let mut dropping_level = None;
 +    let mut in_fence = false;
@@ -4745,7 +5046,9 @@ index c242c83c..eed14248 100644
 +                dropping_level = None;
 +            }
 +            if dropping_level.is_none()
-+                && BOSS_WORKER_DROPPED_STOCK_SECTIONS.contains(&line.trim_end())
++                && dropped_sections
++                    .iter()
++                    .any(|heading| heading.trim_end() == line.trim_end())
 +            {
 +                dropping_level = Some(level);
 +            }
@@ -4773,7 +5076,7 @@ index c242c83c..eed14248 100644
  impl SessionIo {
      /// Submit the `op` wrapped in a `Submission` with a unique ID.
      pub(crate) async fn submit(&self, op: Op) -> CodexResult<String> {
-@@ -1646,6 +1809,19 @@ impl Session {
+@@ -1646,6 +1805,19 @@ impl Session {
                  }
                  self.persist_rollout_items(&rollout_items).await;
  
@@ -4793,7 +5096,7 @@ index c242c83c..eed14248 100644
                  // Forked threads should remain file-backed immediately after startup.
                  self.ensure_rollout_materialized(PersistContext::Standard)
                      .await;
-@@ -2310,6 +2486,18 @@ impl Session {
+@@ -2310,6 +2482,18 @@ impl Session {
  
      /// Persist the event to rollout and send it to clients.
      pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
@@ -4812,7 +5115,7 @@ index c242c83c..eed14248 100644
          let legacy_source = msg.clone();
          if let EventMsg::Error(error) = &legacy_source
              && error
-@@ -2352,8 +2540,10 @@ impl Session {
+@@ -2352,8 +2536,10 @@ impl Session {
                  .track_guardian_session_event(self.thread_id, &event);
          }
          self.send_event_raw(event).await;
@@ -4825,7 +5128,7 @@ index c242c83c..eed14248 100644
          self.maybe_mirror_event_text_to_realtime(&legacy_source)
              .await;
          self.maybe_clear_realtime_handoff_for_event(&legacy_source)
-@@ -4215,10 +4405,14 @@ impl Session {
+@@ -4215,10 +4401,14 @@ impl Session {
              .plugins_for_config(&turn_context.config.plugins_config_input())
              .await
              .without_plugins(&turn_context.disabled_plugin_ids);
@@ -4840,7 +5143,7 @@ index c242c83c..eed14248 100644
          {
              let auth = self.services.auth_manager.auth().await;
              let plugins_config = turn_context.config.plugins_config_input();
-@@ -5034,3 +5228,20 @@ mod elicitation_holders_tests;
+@@ -5034,3 +5224,20 @@ mod elicitation_holders_tests;
  
  #[cfg(test)]
  pub(crate) mod tests;
@@ -4855,40 +5158,68 @@ index c242c83c..eed14248 100644
 +        id: None,
 +        role: "developer".to_string(),
 +        content: vec![ContentItem::InputText {
-+            text: BOSS_SIDE_BOUNDARY.to_string(),
++            text: crate::boss_text::text("side.boundary", BOSS_SIDE_BOUNDARY),
 +        }],
 +        phase: None,
 +        internal_chat_message_metadata_passthrough: None,
 +    }
 +}
 diff --git a/codex-rs/core/src/session/multi_agents.rs b/codex-rs/core/src/session/multi_agents.rs
-index 51e43a4d..a7782feb 100644
+index 51e43a4d..c3d52481 100644
 --- a/codex-rs/core/src/session/multi_agents.rs
 +++ b/codex-rs/core/src/session/multi_agents.rs
-@@ -46,13 +46,21 @@ pub(crate) fn resolve_usage_hints(
+@@ -46,39 +46,136 @@ pub(crate) fn resolve_usage_hints(
      multi_agent_messages: ResolvedMultiAgentMessages<'_>,
      omit_update_plan_instructions: bool,
  ) -> ResolvedMultiAgentV2UsageHints {
 -    let resolve_role = |configured: Option<&str>, message: ResolvedMessage<'_>| {
-+    let resolve_role = |configured: Option<&str>,
-+                        message: ResolvedMessage<'_>,
-+                        suppress_fallback: bool| {
-         // Configured roles take precedence; empty configured or catalog roles suppress fallback.
-         if let Some(configured) = configured {
-             return (!configured.is_empty())
-                 .then(|| MultiAgentRoleInstructions::Configured(configured.to_owned()));
-         }
+-        // Configured roles take precedence; empty configured or catalog roles suppress fallback.
+-        if let Some(configured) = configured {
+-            return (!configured.is_empty())
+-                .then(|| MultiAgentRoleInstructions::Configured(configured.to_owned()));
+-        }
++    let resolve_role =
++        |configured: Option<&str>, message: ResolvedMessage<'_>, suppress_fallback: bool| {
++            // Configured roles take precedence; empty configured or catalog roles suppress fallback.
++            if let Some(configured) = configured {
++                return (!configured.is_empty())
++                    .then(|| MultiAgentRoleInstructions::Configured(configured.to_owned()));
++            }
  
-+        // A worker adapter carries the worker's contract itself; the stock
-+        // subagent text would put the task-assignment identity back.
-+        if suppress_fallback {
-+            return None;
-+        }
+-        let base = message.text();
+-        if base.is_empty() {
+-            return None;
+-        }
+-        Some(MultiAgentRoleInstructions::Composed {
+-            base: base.to_owned(),
+-            marked: message.catalog_override().is_some(),
+-            omit_update_plan_instructions,
+-            max_concurrency: config.max_concurrent_threads_per_session,
+-            wait_agent_enabled: config.wait_agent_enabled,
+-            expose_model_overrides: config.expose_spawn_agent_model_overrides,
+-        })
+-    };
++            // A worker adapter carries the worker's contract itself; the stock
++            // subagent text would put the task-assignment identity back.
++            if suppress_fallback {
++                return None;
++            }
 +
-         let base = message.text();
-         if base.is_empty() {
-             return None;
-@@ -71,14 +79,90 @@ pub(crate) fn resolve_usage_hints(
++            let base = message.text();
++            if base.is_empty() {
++                return None;
++            }
++            Some(MultiAgentRoleInstructions::Composed {
++                base: base.to_owned(),
++                marked: message.catalog_override().is_some(),
++                omit_update_plan_instructions,
++                max_concurrency: config.max_concurrent_threads_per_session,
++                wait_agent_enabled: config.wait_agent_enabled,
++                expose_model_overrides: config.expose_spawn_agent_model_overrides,
++            })
++        };
+ 
+     ResolvedMultiAgentV2UsageHints {
          root: resolve_role(
              config.root_agent_usage_hint_text.as_deref(),
              multi_agent_messages.root,
@@ -4912,7 +5243,11 @@ index 51e43a4d..a7782feb 100644
 +        let mut config = MultiAgentV2Config::default();
 +        config.subagent_developer_instructions = Some("worker adapter".to_string());
 +
-+        let hints = resolve_usage_hints(&config, ResolvedModelMessages::bundled().multi_agent(), false);
++        let hints = resolve_usage_hints(
++            &config,
++            ResolvedModelMessages::bundled().multi_agent(),
++            false,
++        );
 +
 +        assert!(hints.subagent.is_none());
 +    }
@@ -4921,7 +5256,11 @@ index 51e43a4d..a7782feb 100644
 +    fn unconfigured_worker_keeps_default_subagent_usage_fallback() {
 +        let config = MultiAgentV2Config::default();
 +
-+        let hints = resolve_usage_hints(&config, ResolvedModelMessages::bundled().multi_agent(), false);
++        let hints = resolve_usage_hints(
++            &config,
++            ResolvedModelMessages::bundled().multi_agent(),
++            false,
++        );
 +
 +        assert!(hints.subagent.is_some());
 +    }
@@ -4932,7 +5271,11 @@ index 51e43a4d..a7782feb 100644
 +        config.subagent_developer_instructions = Some("worker adapter".to_string());
 +        config.subagent_usage_hint_text = Some("explicit usage hint".to_string());
 +
-+        let hints = resolve_usage_hints(&config, ResolvedModelMessages::bundled().multi_agent(), false);
++        let hints = resolve_usage_hints(
++            &config,
++            ResolvedModelMessages::bundled().multi_agent(),
++            false,
++        );
 +
 +        assert_eq!(
 +            hints
@@ -4963,7 +5306,9 @@ index 51e43a4d..a7782feb 100644
 +            assert!(!text.contains("canonical task"));
 +            assert!(!text.contains("current task"));
 +        }
-+        assert!(root.contains("`colleague_role` for a persistent relationship, domain, or context"));
++        assert!(
++            root.contains("`colleague_role` for a persistent relationship, domain, or context")
++        );
 +        assert!(root.contains("enduring relationship, domain, or context"));
 +        assert!(root.contains("current focus may change on a follow-up"));
 +        assert!(root.contains("Let the colleague update the shared situation"));
@@ -5187,10 +5532,10 @@ index e5038bbc..6e23fe8c 100644
      /// of task kind. Publication does not propagate to child sessions or require
      /// the task to sample; consumers using initial settings remain unchanged.
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index fb4e6474..378ff56e 100644
+index fb4e6474..f5e903f2 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
-@@ -1446,3 +1446,62 @@ async fn guardian_v2_empty_model_defaults_are_equivalent() {
+@@ -1446,3 +1446,68 @@ async fn guardian_v2_empty_model_defaults_are_equivalent() {
          );
      }
  }
@@ -5198,7 +5543,10 @@ index fb4e6474..378ff56e 100644
 +#[tokio::test]
 +async fn retune_effort_moves_the_live_turn_and_only_optionally_later_turns() {
 +    let ActivationFixture {
-+        session, turn, finish, ..
++        session,
++        turn,
++        finish,
++        ..
 +    } = activation_fixture(activation_models()).await;
 +
 +    // A colleague's own retune: the rest of this turn only.
@@ -5225,7 +5573,10 @@ index fb4e6474..378ff56e 100644
 +            .await,
 +        TurnSettingsUpdateOutcome::Applied
 +    );
-+    assert_eq!(turn.current_reasoning_effort(), Some(ReasoningEffort::Medium));
++    assert_eq!(
++        turn.current_reasoning_effort(),
++        Some(ReasoningEffort::Medium)
++    );
 +    assert_eq!(
 +        session.thread_settings_snapshot().await.reasoning_effort,
 +        Some(ReasoningEffort::Medium)
@@ -5284,7 +5635,7 @@ index c915037a..805b5abe 100644
              // The models manager already owns its catalog.
              model_catalog: None,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 723f85a8..e27cfd41 100644
+index 723f85a8..1cd3fc69 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -13,6 +13,7 @@ use crate::agents_md_manager::SessionInstructions;
@@ -5295,7 +5646,7 @@ index 723f85a8..e27cfd41 100644
  use crate::context::ContextualUserFragment;
  use crate::context::DeveloperInstructions;
  use crate::context::GuardianContextMode;
-@@ -1698,6 +1699,193 @@ async fn user_shell_commands_remain_login_shells_when_model_login_shells_are_dis
+@@ -1698,6 +1699,203 @@ async fn user_shell_commands_remain_login_shells_when_model_login_shells_are_dis
      Ok(())
  }
  
@@ -5313,6 +5664,13 @@ index 723f85a8..e27cfd41 100644
 +    super::strip_boss_stock_instructions(&mut base, Some("Stock model A base"));
 +    super::append_boss_stock_instructions(&mut base, "Stock model B base");
 +    assert_eq!(base, "Boss chat base\n\nStock model B base");
++}
++
++fn default_dropped_sections() -> Vec<String> {
++    crate::config::DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS
++        .iter()
++        .map(|heading| (*heading).to_string())
++        .collect()
 +}
 +
 +#[test]
@@ -5356,7 +5714,7 @@ index 723f85a8..e27cfd41 100644
 +";
 +
 +    assert_eq!(
-+        super::boss_worker_stock_instructions(stock),
++        super::boss_worker_stock_instructions(stock, &default_dropped_sections()),
 +        "\
 +You are Codex.
 +
@@ -5381,7 +5739,10 @@ index 723f85a8..e27cfd41 100644
 +#[test]
 +fn boss_worker_stock_instructions_leave_a_prompt_without_those_sections_alone() {
 +    let stock = "# Personality\n\nBe clear.\n\n# Rules for getting work done\n\n- Use rg.";
-+    assert_eq!(super::boss_worker_stock_instructions(stock), stock);
++    assert_eq!(
++        super::boss_worker_stock_instructions(stock, &default_dropped_sections()),
++        stock
++    );
 +}
 +
 +#[tokio::test]
@@ -5489,7 +5850,7 @@ index 723f85a8..e27cfd41 100644
  #[tokio::test]
  async fn reload_user_config_layer_updates_effective_apps_config() {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -6107,6 +6295,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -6107,6 +6305,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
      .expect("initialize test hooks");
      let services = SessionServices {
          mcp_runtime,
@@ -5498,7 +5859,7 @@ index 723f85a8..e27cfd41 100644
          mcp_handler_cache: Default::default(),
          unified_exec_manager: UnifiedExecProcessManager::new(
              config.background_terminal_max_timeout,
-@@ -8293,6 +8483,8 @@ where
+@@ -8293,6 +8493,8 @@ where
      .expect("initialize test hooks");
      let services = SessionServices {
          mcp_runtime,
@@ -5507,7 +5868,7 @@ index 723f85a8..e27cfd41 100644
          mcp_handler_cache: Default::default(),
          unified_exec_manager: UnifiedExecProcessManager::new(
              config.background_terminal_max_timeout,
-@@ -11918,6 +12110,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -11918,6 +12120,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
          turn_store: Arc::new(codex_extension_api::ExtensionData::new(tc.sub_id.clone())),
          tool_runtime: test_tool_runtime(Arc::clone(&sess), Arc::clone(&tc)),
          cancellation_token: CancellationToken::new(),
@@ -5518,7 +5879,7 @@ index 723f85a8..e27cfd41 100644
  
      let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 24e59a33..590428dc 100644
+index 24e59a33..530e4eb2 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -40,6 +40,7 @@ use crate::session::session::Session;
@@ -5529,7 +5890,7 @@ index 24e59a33..590428dc 100644
  use crate::stream_events_utils::HandleOutputCtx;
  use crate::stream_events_utils::InFlightFuture;
  use crate::stream_events_utils::TurnItemContributorPolicy;
-@@ -1523,11 +1524,18 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+@@ -1523,11 +1524,21 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
  
  #[instrument(level = "trace", skip_all)]
  pub(crate) fn build_prompt(
@@ -5544,12 +5905,15 @@ index 24e59a33..590428dc 100644
 +    if crate::tools::boss_main_execution_isolation_active(turn_context)
 +        || crate::tools::boss_side_conversation_active(turn_context)
 +    {
-+        crate::context_manager::boss_projection::project(&mut input);
++        crate::context_manager::boss_projection::project(
++            &mut input,
++            turn_context.config.boss_recent_evidence_tokens,
++        );
 +    }
      Prompt {
          input,
          tools: step_context.tool_router.model_visible_specs(),
-@@ -2467,6 +2475,11 @@ async fn try_run_sampling_request(
+@@ -2467,6 +2478,11 @@ async fn try_run_sampling_request(
          .instrument(trace_span!("stream_request"))
          .or_cancel(&cancellation_token)
          .await??;
@@ -5561,7 +5925,7 @@ index 24e59a33..590428dc 100644
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
-@@ -2549,6 +2562,13 @@ async fn try_run_sampling_request(
+@@ -2549,6 +2565,13 @@ async fn try_run_sampling_request(
              }
              ResponseEvent::OutputItemDone(mut item) => {
                  assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
@@ -5575,7 +5939,7 @@ index 24e59a33..590428dc 100644
                  if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                      let call_id = match &item {
                          ResponseItem::FunctionCall { call_id, .. }
-@@ -2611,6 +2631,7 @@ async fn try_run_sampling_request(
+@@ -2611,6 +2634,7 @@ async fn try_run_sampling_request(
                      turn_store: Arc::clone(&turn_store),
                      tool_runtime: tool_runtime.clone(),
                      cancellation_token: cancellation_token.child_token(),
@@ -5713,7 +6077,7 @@ index 84c66011..f42bcaf8 100644
      pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
      pub(crate) turn_environments: Arc<ThreadEnvironments>,
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 3e3456e9..e389be0e 100644
+index 3e3456e9..5e41b9a5 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -1,5 +1,7 @@
@@ -5740,7 +6104,7 @@ index 3e3456e9..e389be0e 100644
  use codex_utils_stream_parser::strip_proposed_plan_blocks;
  use futures::Future;
  use tracing::debug;
-@@ -217,6 +221,90 @@ pub(crate) struct HandleOutputCtx {
+@@ -217,6 +221,98 @@ pub(crate) struct HandleOutputCtx {
      pub turn_store: Arc<ExtensionData>,
      pub tool_runtime: ToolCallRuntime,
      pub cancellation_token: CancellationToken,
@@ -5761,9 +6125,11 @@ index 3e3456e9..e389be0e 100644
 +        }
 +    }
 +
-+    fn admit(&self, turn_context: &TurnContext) -> std::result::Result<(), &'static str> {
++    fn admit(&self, turn_context: &TurnContext) -> std::result::Result<(), String> {
 +        let state = &turn_context.turn_metadata_state;
++        let rounds = turn_context.config.boss_observation_rounds_per_turn;
 +        match self.calls_at_request_start {
++            round if round >= rounds => Err(observation_exhausted_message()),
 +            // The initial observation round may contain multiple parallel calls.
 +            0 => {
 +                if !self.admitted_call.swap(true, Ordering::AcqRel) {
@@ -5771,28 +6137,34 @@ index 3e3456e9..e389be0e 100644
 +                }
 +                Ok(())
 +            }
-+            // A second actual observation is a one-time continuation, gated by
-+            // visible rationale in the conversation.
-+            1 => {
++            // Each later round is one continuation, gated by a visible rationale
++            // written since the previous one.
++            round => {
 +                if self.admitted_call.swap(true, Ordering::AcqRel) {
-+                    return Err(BOSS_MAIN_OBSERVATION_EXHAUSTED_MESSAGE);
++                    return Err(observation_exhausted_message());
 +                }
 +                if state.take_boss_main_observation_rationale()
-+                    && state.record_boss_main_observation_continuation()
++                    && state.record_boss_main_observation_continuation(round)
 +                {
 +                    Ok(())
 +                } else {
 +                    self.admitted_call.store(false, Ordering::Release);
-+                    Err(BOSS_MAIN_OBSERVATION_RATIONALE_MESSAGE)
++                    Err(crate::boss_text::text(
++                        "gate.observation_needs_rationale",
++                        "Direct observation is unavailable for this turn. First write a visible rationale explaining why one more observation is necessary, or delegate the investigation to a worker.",
++                    ))
 +                }
 +            }
-+            _ => Err(BOSS_MAIN_OBSERVATION_EXHAUSTED_MESSAGE),
 +        }
 +    }
 +}
 +
-+const BOSS_MAIN_OBSERVATION_RATIONALE_MESSAGE: &str = "Direct observation is unavailable for this turn. First write a visible rationale explaining why one more observation is necessary, or delegate the investigation to a worker.";
-+const BOSS_MAIN_OBSERVATION_EXHAUSTED_MESSAGE: &str = "Direct observation is exhausted for this turn. Delegate any further investigation to a worker.";
++fn observation_exhausted_message() -> String {
++    crate::boss_text::text(
++        "gate.observation_exhausted",
++        "Direct observation is exhausted for this turn. Delegate any further investigation to a worker.",
++    )
++}
 +
 +/// The tool to hold against Boss Main's observation budget, if any.
 +///
@@ -5831,7 +6203,7 @@ index 3e3456e9..e389be0e 100644
  }
  
  pub(crate) async fn apply_turn_item_contributors(
-@@ -305,7 +393,32 @@ pub(crate) async fn handle_output_item_done(
+@@ -305,7 +401,32 @@ pub(crate) async fn handle_output_item_done(
      let mut output = OutputItemResult::default();
      let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
  
@@ -5859,31 +6231,33 @@ index 3e3456e9..e389be0e 100644
 +        });
 +
 +    match blocked_boss_observation
-+        .map(|message| Err(FunctionCallError::RespondToModel(message.to_string())))
++        .map(|message| Err(FunctionCallError::RespondToModel(message)))
 +        .unwrap_or(dispatch)
 +    {
          // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
          Ok(Some(call)) => {
              call_trace::received(
 diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
-index 2f5bc570..f6e65b81 100644
+index 2f5bc570..5e9af4e6 100644
 --- a/codex-rs/core/src/stream_events_utils_tests.rs
 +++ b/codex-rs/core/src/stream_events_utils_tests.rs
-@@ -1,3 +1,5 @@
+@@ -1,5 +1,7 @@
 +use super::BossMainObservationRequest;
-+use super::boss_observation_to_gate;
  use super::HandleOutputCtx;
  use super::TurnItemContributorPolicy;
++use super::boss_observation_to_gate;
  use super::completed_item_defers_mailbox_delivery_to_next_turn;
-@@ -19,6 +21,7 @@ use codex_extension_api::ExtensionData;
- use codex_extension_api::TurnItemContributor;
- use codex_features::Feature;
- use codex_login::CodexAuth;
+ use super::finalize_non_tool_response_item;
+ use super::handle_non_tool_response_item;
+@@ -30,6 +32,7 @@ use codex_protocol::models::LocalShellExecAction;
+ use codex_protocol::models::LocalShellStatus;
+ use codex_protocol::models::MessagePhase;
+ use codex_protocol::models::ResponseItem;
 +use codex_tools::ToolName;
- use codex_protocol::ResponseItemId;
- use codex_protocol::items::AgentMessageContent;
- use codex_protocol::items::TurnItem;
-@@ -51,6 +54,86 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) ->
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
+ use std::sync::Arc;
+@@ -51,6 +54,122 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) ->
      }
  }
  
@@ -5938,6 +6312,42 @@ index 2f5bc570..f6e65b81 100644
 +    assert!(exhausted.contains("exhausted"));
 +}
 +
++#[tokio::test]
++async fn boss_main_observation_rounds_follow_the_profile() {
++    let (_session, mut turn_context) = make_session_and_context().await;
++    Arc::make_mut(&mut turn_context.config).boss_observation_rounds_per_turn = 3;
++
++    assert!(
++        BossMainObservationRequest::new(0)
++            .admit(&turn_context)
++            .is_ok()
++    );
++    for round in 1..3 {
++        turn_context
++            .turn_metadata_state
++            .note_boss_main_visible_rationale();
++        assert!(
++            BossMainObservationRequest::new(round)
++                .admit(&turn_context)
++                .is_ok(),
++            "round {round} is within the configured three"
++        );
++    }
++    turn_context
++        .turn_metadata_state
++        .note_boss_main_visible_rationale();
++    let exhausted = BossMainObservationRequest::new(3)
++        .admit(&turn_context)
++        .expect_err("a fourth round is past the configured three");
++    assert!(exhausted.contains("exhausted"));
++
++    Arc::make_mut(&mut turn_context.config).boss_observation_rounds_per_turn = 1;
++    let only_one = BossMainObservationRequest::new(1)
++        .admit(&turn_context)
++        .expect_err("with one round there is no continuation");
++    assert!(only_one.contains("exhausted"));
++}
++
 +#[test]
 +fn boss_observation_budget_ignores_hosted_items_it_cannot_hold_back() {
 +    let hosted_search = ResponseItem::WebSearchCall {
@@ -5970,7 +6380,7 @@ index 2f5bc570..f6e65b81 100644
  #[test]
  fn external_context_pollution_items_include_web_search_and_tool_search() {
      let polluting_items = [
-@@ -305,6 +388,7 @@ fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> Hand
+@@ -305,6 +424,7 @@ fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> Hand
          turn_store: Arc::new(ExtensionData::new(turn_context.sub_id.clone())),
          tool_runtime,
          cancellation_token: CancellationToken::new(),
@@ -6043,7 +6453,7 @@ index 50807e62..ce10bdc9 100644
      }
  }
 diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
-index 2a7c4811..f36c3eb1 100644
+index 2a7c4811..8409fd10 100644
 --- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
 +++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
 @@ -1,4 +1,5 @@
@@ -6057,17 +6467,17 @@ index 2a7c4811..f36c3eb1 100644
          } = invocation;
  
 +        if boss_main_execution_isolation_active(&turn) {
-+            return Err(FunctionCallError::RespondToModel(
-+                "Boss Main cannot execute local code directly; delegate substantial execution to a Worker"
-+                    .to_string(),
-+            ));
++            return Err(FunctionCallError::RespondToModel(crate::boss_text::text(
++                "gate.main_code_execution",
++                "Boss Main cannot execute local code directly; delegate substantial execution to a Worker",
++            )));
 +        }
 +
          let mut telemetry = CodeModeToolCallGuard::new(
              session.services.analytics_events_client.clone(),
              session.thread_id.to_string(),
 diff --git a/codex-rs/core/src/tools/handlers/apply_patch.rs b/codex-rs/core/src/tools/handlers/apply_patch.rs
-index 5ab66662..caa1df93 100644
+index 5ab66662..838183cc 100644
 --- a/codex-rs/core/src/tools/handlers/apply_patch.rs
 +++ b/codex-rs/core/src/tools/handlers/apply_patch.rs
 @@ -14,6 +14,7 @@ use crate::session::session::Session;
@@ -6078,20 +6488,21 @@ index 5ab66662..caa1df93 100644
  use crate::tools::context::ApplyPatchToolOutput;
  use crate::tools::context::FunctionToolOutput;
  use crate::tools::context::SharedTurnDiffTracker;
-@@ -377,6 +378,17 @@ impl ApplyPatchHandler {
+@@ -377,6 +378,18 @@ impl ApplyPatchHandler {
                  "apply_patch handler received unsupported payload".to_string(),
              ));
          };
 +        if boss_main_execution_isolation_active(&turn) {
-+            return Err(FunctionCallError::RespondToModel(
-+                "Boss Main does not modify local files directly; delegate substantial execution to a Worker"
-+                    .to_string(),
-+            ));
++            return Err(FunctionCallError::RespondToModel(crate::boss_text::text(
++                "gate.main_file_edit",
++                "Boss Main does not modify local files directly; delegate substantial execution to a Worker",
++            )));
 +        }
 +        if crate::tools::boss_side_conversation_active(&turn) {
-+            return Err(FunctionCallError::RespondToModel(
-+                "This side conversation is read-only and does not modify files".to_string(),
-+            ));
++            return Err(FunctionCallError::RespondToModel(crate::boss_text::text(
++                "gate.side_file_edit",
++                "This side conversation is read-only and does not modify files",
++            )));
 +        }
          let args = match codex_apply_patch::parse_patch(&patch_input) {
              Ok(args) => args,
@@ -6197,10 +6608,10 @@ index d5fccaa5..5af43e28 100644
 +    }
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_common.rs b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
-index 715a02be..0f70abf3 100644
+index 715a02be..aca889af 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_common.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
-@@ -145,3 +145,45 @@ pub(crate) fn parse_collab_input(
+@@ -145,3 +145,55 @@ pub(crate) fn parse_collab_input(
          }
      }
  }
@@ -6216,38 +6627,48 @@ index 715a02be..0f70abf3 100644
 +        ));
 +    }
 +
-+    let current_focus = current_focus
-+        .as_deref()
-+        .map(str::trim)
-+        .filter(|focus| !focus.is_empty())
-+        .unwrap_or("Contribute wherever your judgment can change the shared outcome.");
-+
-+    Ok(format!(
++    let current_focus = colleague_focus(current_focus);
++    Ok(crate::boss_text::text(
++        "envelope.joining",
 +        "Join the shared situation as a colleague.\n\n\
 +         Shared context (current result, situation, constraints, and uncertainties):\n{shared_context}\n\n\
 +         Current focus (where attention is useful now and may change):\n{current_focus}\n\n\
 +         Tell the lead the choices that shape the result as you make them.\n\
 +         When this turn ends, remain available to continue the shared situation.",
-+    ))
++    )
++    .replace("{shared_context}", shared_context)
++    .replace("{current_focus}", &current_focus))
 +}
 +
-+pub(crate) fn compose_encrypted_colleague_join_context(current_focus: Option<String>) -> String {
-+    let current_focus = current_focus
++/// The focus a colleague is handed, or the built-in one when the lead gave none.
++fn colleague_focus(current_focus: Option<String>) -> String {
++    current_focus
 +        .as_deref()
 +        .map(str::trim)
 +        .filter(|focus| !focus.is_empty())
-+        .unwrap_or("Contribute wherever your judgment can change the shared outcome.");
++        .map(str::to_string)
++        .unwrap_or_else(|| {
++            crate::boss_text::text(
++                "envelope.default_focus",
++                "Contribute wherever your judgment can change the shared outcome.",
++            )
++        })
++}
 +
-+    format!(
++pub(crate) fn compose_encrypted_colleague_join_context(current_focus: Option<String>) -> String {
++    let current_focus = colleague_focus(current_focus);
++    crate::boss_text::text(
++        "envelope.joining_encrypted",
 +        "Join the shared situation as a colleague.\n\n\
 +         Current focus (where attention is useful now and may change):\n{current_focus}\n\n\
 +         Tell the lead the choices that shape the result as you make them.\n\
 +         The encrypted content below is the shared situation. When this turn ends, remain \
 +         available to continue it.",
 +    )
++    .replace("{current_focus}", &current_focus)
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
-index 43611618..2ca291d1 100644
+index 43611618..12bdb3dd 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 @@ -91,7 +91,15 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
@@ -6295,136 +6716,199 @@ index 43611618..2ca291d1 100644
              Some(false.into()),
          ),
          output_schema: Some(
-@@ -183,13 +187,16 @@ pub fn create_send_message_tool() -> ToolSpec {
+@@ -182,23 +186,29 @@ pub fn create_send_message_tool() -> ToolSpec {
+     let properties = BTreeMap::from([
          (
              "target".to_string(),
-             JsonSchema::string(Some(
+-            JsonSchema::string(Some(
 -                "Relative or canonical task name to message (from spawn_agent).".to_string(),
-+                "Agent id or stable colleague role from spawn_agent.".to_string(),
-             )),
+-            )),
++            JsonSchema::string(Some(crate::boss_text::text(
++                "tools.send_message.target",
++                "Agent id or stable colleague role from spawn_agent.",
++            ))),
          ),
          (
              "message".to_string(),
-             JsonSchema::string(Some(
+-            JsonSchema::string(Some(
 -                "Message text to queue on the target agent.".to_string(),
+-            ))
++            JsonSchema::string(Some(crate::boss_text::text(
++                "tools.send_message.message",
 +                "What you want this colleague to know: a new fact, something that \
 +                 changed, or what you are now thinking. Write it as you would to a \
-+                 person who already shares the situation."
-+                    .to_string(),
-             ))
++                 person who already shares the situation.",
++            )))
              .with_encrypted(),
          ),
-@@ -197,7 +204,7 @@ pub fn create_send_message_tool() -> ToolSpec {
+     ]);
  
      ToolSpec::Function(ResponsesApiTool {
          name: "send_message".to_string(),
 -        description: "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
-+        description: "Send a message to an existing colleague. It is delivered at the next safe sampling boundary when the colleague is running, and wakes the same open colleague for another turn when idle. It does not start a concurrent turn. This is also how you reach the root colleague: a message to root is delivered without waking it, so root sees it on its next turn or through wait_agent."
-             .to_string(),
+-            .to_string(),
++        description: crate::boss_text::text(
++            "tools.send_message.description",
++            "Send a message to an existing colleague. It is delivered at the next safe sampling boundary when the colleague is running, and wakes the same open colleague for another turn when idle. It does not start a concurrent turn. This is also how you reach the root colleague: a message to root is delivered without waking it, so root sees it on its next turn or through wait_agent.",
++        ),
          strict: false,
          defer_loading: None,
-@@ -215,22 +222,37 @@ pub fn create_followup_task_tool() -> ToolSpec {
+         parameters: JsonSchema::object(
+@@ -214,27 +224,48 @@ pub fn create_followup_task_tool() -> ToolSpec {
+     let properties = BTreeMap::from([
          (
              "target".to_string(),
-             JsonSchema::string(Some(
+-            JsonSchema::string(Some(
 -                "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+-                    .to_string(),
+-            )),
++            JsonSchema::string(Some(crate::boss_text::text(
++                "tools.followup_task.target",
 +                "The colleague to continue with: agent id or stable colleague role \
-+                 returned by spawn_agent. Reuse the same role when the focus changes."
-                     .to_string(),
-             )),
++                 returned by spawn_agent. Reuse the same role when the focus changes.",
++            ))),
          ),
          (
              "message".to_string(),
-             JsonSchema::string(Some(
+-            JsonSchema::string(Some(
 -                "Message text to send to the target agent.".to_string(),
+-            ))
++            JsonSchema::string(Some(crate::boss_text::text(
++                "tools.followup_task.message",
 +                "What you are bringing back to this colleague: what has developed \
 +                 since, and what now matters. They still hold the understanding they \
 +                 built earlier, so continue that thread rather than restating the \
-+                 work as a fresh assignment."
-+                    .to_string(),
-             ))
++                 work as a fresh assignment.",
++            )))
              .with_encrypted(),
          ),
 +        (
 +            "reasoning_effort".to_string(),
-+            JsonSchema::string(Some(
++            JsonSchema::string(Some(crate::boss_text::text(
++                "tools.followup_task.reasoning_effort",
 +                "The colleague's effort from here on. Every follow-up is the moment to \
 +                 set it again: match what this next stretch asks for, not what the \
 +                 colleague was first invited for. Omit to keep its current level; \
-+                 changing it keeps the colleague's cache."
-+                    .to_string(),
-+            )),
++                 changing it keeps the colleague's cache.",
++            ))),
 +        ),
      ]);
  
      ToolSpec::Function(ResponsesApiTool {
          name: "followup_task".to_string(),
 -        description: "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
-+        description: "Continue working with an existing non-root colleague and trigger a turn if it is idle. If the colleague is already running, deliver the message at a safe sampling boundary without starting a concurrent turn. This cannot target the root colleague and is rejected if you try; use send_message to reach root."
-             .to_string(),
+-            .to_string(),
++        description: crate::boss_text::text(
++            "tools.followup_task.description",
++            "Continue working with an existing non-root colleague and trigger a turn if it is idle. If the colleague is already running, deliver the message at a safe sampling boundary without starting a concurrent turn. This cannot target the root colleague and is rejected if you try; use send_message to reach root.",
++        ),
          strict: false,
          defer_loading: None,
-@@ -280,7 +302,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
+-        parameters: JsonSchema::object(properties, Some(vec!["target".to_string(), "message".to_string()]), Some(false.into())),
++        parameters: JsonSchema::object(
++            properties,
++            Some(vec!["target".to_string(), "message".to_string()]),
++            Some(false.into()),
++        ),
+         output_schema: None,
+     })
+ }
+@@ -280,8 +311,10 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
  pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
      ToolSpec::Function(ResponsesApiTool {
          name: "wait_agent".to_string(),
 -        description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
-+        description: "Wait for a mailbox update from any open colleague, including queued messages and turn-completion notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which colleagues have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
-             .to_string(),
+-            .to_string(),
++        description: crate::boss_text::text(
++            "tools.wait_agent.description",
++            "Wait for a mailbox update from any open colleague, including queued messages and turn-completion notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which colleagues have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
++        ),
          strict: false,
          defer_loading: None,
-@@ -293,7 +315,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
+         parameters: wait_agent_tool_parameters_v2(options),
+@@ -292,17 +325,18 @@ pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
+ pub fn create_list_agents_tool() -> ToolSpec {
      let properties = BTreeMap::from([(
          "path_prefix".to_string(),
-         JsonSchema::string(Some(
+-        JsonSchema::string(Some(
 -            "Task-path prefix filter without a trailing slash. Omit to list all live agents."
-+            "Colleague-path prefix filter without a trailing slash. Omit to list all open colleagues."
-                 .to_string(),
-         )),
+-                .to_string(),
+-        )),
++        JsonSchema::string(Some(crate::boss_text::text(
++            "tools.list_agents.path_prefix",
++            "Colleague-path prefix filter without a trailing slash. Omit to list all open colleagues.",
++        ))),
      )]);
-@@ -301,7 +323,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
+ 
      ToolSpec::Function(ResponsesApiTool {
          name: "list_agents".to_string(),
-         description:
+-        description:
 -            "List live agents in the current root thread tree. Optionally filter by task-path prefix."
-+            "List open colleagues in the current root thread tree, including idle and unloaded colleagues that remain available. Optionally filter by colleague-path prefix."
-                 .to_string(),
+-                .to_string(),
++        description: crate::boss_text::text(
++            "tools.list_agents.description",
++            "List open colleagues in the current root thread tree, including idle and unloaded colleagues that remain available. Optionally filter by colleague-path prefix.",
++        ),
          strict: false,
          defer_loading: None,
-@@ -339,13 +361,13 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
+         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+@@ -338,17 +372,25 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
+ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
      let properties = BTreeMap::from([(
          "target".to_string(),
-         JsonSchema::string(Some(
+-        JsonSchema::string(Some(
 -            "Agent id or canonical task name to interrupt (from spawn_agent).".to_string(),
-+            "Agent id or stable colleague role from spawn_agent.".to_string(),
-         )),
+-        )),
++        JsonSchema::string(Some(crate::boss_text::text(
++            "tools.interrupt_agent.target",
++            "Agent id or stable colleague role from spawn_agent.",
++        ))),
      )]);
  
      ToolSpec::Function(ResponsesApiTool {
          name: "interrupt_agent".to_string(),
 -        description: "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.".to_string(),
-+        description: "Interrupt a colleague's current turn, if any, and return its previous status. The colleague remains available for messages and follow-up turns.".to_string(),
++        description: crate::boss_text::text(
++            "tools.interrupt_agent.description",
++            "Interrupt a colleague's current turn, if any, and return its previous status. The colleague remains available for messages and follow-up turns.",
++        ),
          strict: false,
          defer_loading: None,
-         parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
-@@ -358,6 +380,77 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
+-        parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
++        parameters: JsonSchema::object(
++            properties,
++            Some(vec!["target".to_string()]),
++            Some(false.into()),
++        ),
+         output_schema: Some(
+             agent_previous_status_output_schema(
+                 "The agent status observed before the interrupt request was handled.",
+@@ -358,6 +400,98 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
      })
  }
  
 +pub fn create_compact_agent_tool_v2() -> ToolSpec {
 +    let properties = BTreeMap::from([(
 +        "target".to_string(),
-+        JsonSchema::string(Some(
-+            "Agent id or stable colleague role from spawn_agent.".to_string(),
-+        )),
++        JsonSchema::string(Some(crate::boss_text::text(
++            "tools.compact_agent.target",
++            "Agent id or stable colleague role from spawn_agent.",
++        ))),
 +    )]);
 +
 +    ToolSpec::Function(ResponsesApiTool {
 +        name: "compact_agent".to_string(),
-+        description: "Ask a colleague to compact its own context: it keeps the thread, its identity and its understanding of the work, and drops the transcript weight behind them. Use this instead of replacing a colleague that has grown heavy — a new one starts light but has to rebuild its picture of the project before it can help, and that rebuild is the expensive part. Judge by the situation, not by arithmetic. It is usually worth compacting when a colleague has just finished something whole — shipped a PR, closed out a phase, handed back a conclusion — because that is when the detail behind it stops being needed. `list_agents` reports each colleague's `context_used_percent`; treat it as one input among several, weighted by what the colleague is in the middle of. Around 60% it is worth doing at the next natural break. Around 75% it is worth doing soon even mid-task, because every later step is being charged at that size. Past 85% the runtime will compact on its own shortly, which costs more than choosing the moment yourself. A colleague well under half full, or one partway through something it cannot easily resume, is usually better left alone. Compacting costs one summarizing turn and a few seconds; the colleague continues from where it was.".to_string(),
++        description: crate::boss_text::text(
++            "tools.compact_agent.description",
++            "Ask a colleague to compact its own context: it keeps the thread, its identity and its understanding of the work, and drops the transcript weight behind them. Use this instead of replacing a colleague that has grown heavy — a new one starts light but has to rebuild its picture of the project before it can help, and that rebuild is the expensive part. Judge by the situation, not by arithmetic. It is usually worth compacting when a colleague has just finished something whole — shipped a PR, closed out a phase, handed back a conclusion — because that is when the detail behind it stops being needed. `list_agents` reports each colleague's `context_used_percent`; treat it as one input among several, weighted by what the colleague is in the middle of. Around 60% it is worth doing at the next natural break. Around 75% it is worth doing soon even mid-task, because every later step is being charged at that size. Past 85% the runtime will compact on its own shortly, which costs more than choosing the moment yourself. A colleague well under half full, or one partway through something it cannot easily resume, is usually better left alone. Compacting costs one summarizing turn and a few seconds; the colleague continues from where it was.",
++        ),
 +        strict: false,
 +        defer_loading: None,
-+        parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
++        parameters: JsonSchema::object(
++            properties,
++            Some(vec!["target".to_string()]),
++            Some(false.into()),
++        ),
 +        output_schema: Some(
 +            agent_previous_status_output_schema(
 +                "The agent status observed before the compaction request was handled.",
@@ -6438,19 +6922,26 @@ index 43611618..2ca291d1 100644
 +    let properties = BTreeMap::from([
 +        (
 +            "target".to_string(),
-+            JsonSchema::string(Some(
-+                "Agent id or stable colleague role from spawn_agent.".to_string(),
-+            )),
++            JsonSchema::string(Some(crate::boss_text::text(
++                "tools.set_agent_effort.target",
++                "Agent id or stable colleague role from spawn_agent.",
++            ))),
 +        ),
 +        (
 +            "reasoning_effort".to_string(),
-+            JsonSchema::string(Some("The new level.".to_string())),
++            JsonSchema::string(Some(crate::boss_text::text(
++                "tools.set_agent_effort.reasoning_effort",
++                "The new level.",
++            ))),
 +        ),
 +    ]);
 +
 +    ToolSpec::Function(ResponsesApiTool {
 +        name: "set_agent_effort".to_string(),
-+        description: "Change a colleague's reasoning effort without sending new work. It takes effect from the colleague's next step, including in a turn already under way, and stays for later turns. Come back to it whenever `wait_agent` shows the work no longer matches the colleague's `reasoning_effort` — a long run of routine commands at a high level, or a colleague going round on something hard at a low one. Changing it keeps the colleague's cache.".to_string(),
++        description: crate::boss_text::text(
++            "tools.set_agent_effort.description",
++            "Change a colleague's reasoning effort without sending new work. It takes effect from the colleague's next step, including in a turn already under way, and stays for later turns. Come back to it whenever `wait_agent` shows the work no longer matches the colleague's `reasoning_effort` — a long run of routine commands at a high level, or a colleague going round on something hard at a low one. Changing it keeps the colleague's cache.",
++        ),
 +        strict: false,
 +        defer_loading: None,
 +        parameters: JsonSchema::object(
@@ -6465,12 +6956,18 @@ index 43611618..2ca291d1 100644
 +pub fn create_set_reasoning_effort_tool() -> ToolSpec {
 +    let properties = BTreeMap::from([(
 +        "reasoning_effort".to_string(),
-+        JsonSchema::string(Some("The new level.".to_string())),
++        JsonSchema::string(Some(crate::boss_text::text(
++            "tools.set_reasoning_effort.reasoning_effort",
++            "The new level.",
++        ))),
 +    )]);
 +
 +    ToolSpec::Function(ResponsesApiTool {
 +        name: "set_reasoning_effort".to_string(),
-+        description: "Change your own reasoning effort for the rest of this turn. Come back to it whenever the step in front of you changes weight: raise it on reaching something that needs care — a subtle bug, a design choice, a result that does not add up — and lower it once what is left is routine. Your next turn starts again at the level you were given. Changing it keeps your cache.".to_string(),
++        description: crate::boss_text::text(
++            "tools.set_reasoning_effort.description",
++            "Change your own reasoning effort for the rest of this turn. Come back to it whenever the step in front of you changes weight: raise it on reaching something that needs care — a subtle bug, a design choice, a result that does not add up — and lower it once what is left is routine. Your next turn starts again at the level you were given. Changing it keeps your cache.",
++        ),
 +        strict: false,
 +        defer_loading: None,
 +        parameters: JsonSchema::object(
@@ -6485,7 +6982,7 @@ index 43611618..2ca291d1 100644
  fn agent_status_output_schema() -> Value {
      json!({
          "oneOf": [
-@@ -412,12 +505,12 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
+@@ -412,12 +546,12 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
          return json!({
              "type": "object",
              "properties": {
@@ -6501,7 +6998,7 @@ index 43611618..2ca291d1 100644
              "additionalProperties": false
          });
      }
-@@ -425,16 +518,16 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
+@@ -425,16 +559,16 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
      json!({
          "type": "object",
          "properties": {
@@ -6521,7 +7018,7 @@ index 43611618..2ca291d1 100644
          "additionalProperties": false
      })
  }
-@@ -464,17 +557,22 @@ fn list_agents_output_schema() -> Value {
+@@ -464,17 +598,22 @@ fn list_agents_output_schema() -> Value {
                      "properties": {
                          "agent_name": {
                              "type": "string",
@@ -6549,7 +7046,7 @@ index 43611618..2ca291d1 100644
              }
          },
          "required": ["agents"],
-@@ -587,13 +685,26 @@ fn create_collab_input_items_schema() -> JsonSchema {
+@@ -587,13 +726,26 @@ fn create_collab_input_items_schema() -> JsonSchema {
  fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
      BTreeMap::from([
          (
@@ -6571,7 +7068,7 @@ index 43611618..2ca291d1 100644
 +        (
 +            "current_focus".to_string(),
 +            JsonSchema::string(Some(
-+                "Where this colleague's attention is most useful now. It is a changeable focus, not the boundary of their understanding or participation. Plain text."
++                "What this colleague is needed for now; it can change on a follow-up. Plain text."
                      .to_string(),
              )),
          ),
@@ -6579,7 +7076,7 @@ index 43611618..2ca291d1 100644
          (
              "agent_type".to_string(),
              JsonSchema::string(Some(format!(
-@@ -626,12 +737,27 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
+@@ -626,12 +778,33 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
  fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
      BTreeMap::from([
          (
@@ -6587,29 +7084,61 @@ index 43611618..2ca291d1 100644
 +            "colleague_role".to_string(),
              JsonSchema::string(Some(
 -                "Initial plain-text task for the new agent.".to_string(),
-+                "Persistent colleague relationship, domain, or context used to continue the same colleague. Do not name it after the current action, query, deliverable, or phase. Use lowercase letters, digits, and underscores."
-+                    .to_string(),
++                crate::boss_text::text(
++                "tools.spawn_agent.colleague_role",
++                "Persistent colleague relationship, domain, or context used to continue the same colleague. Do not name it after the current action, query, deliverable, or phase. Use lowercase letters, digits, and underscores.",
++            ),
 +            )),
 +        ),
 +        (
 +            "shared_context".to_string(),
 +            JsonSchema::string(Some(
-+                "The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. It is there so the colleague understands why the focus matters. Plain text."
-+                    .to_string(),
++                crate::boss_text::text(
++                "tools.spawn_agent.shared_context",
++                "The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. It is there so the colleague understands why the focus matters. Plain text.",
++            ),
              ))
              .with_encrypted(),
          ),
 +        (
 +            "current_focus".to_string(),
 +            JsonSchema::string(Some(
-+                "Where this colleague's attention is most useful now. It is a changeable focus, not the boundary of their understanding or participation. Plain text."
-+                    .to_string(),
++                crate::boss_text::text(
++                "tools.spawn_agent.current_focus",
++                "What this colleague is needed for now; it can change on a follow-up. Plain text.",
++            ),
 +            )),
 +        ),
          (
              "agent_type".to_string(),
              JsonSchema::string(Some(format!(
-@@ -679,7 +805,7 @@ fn spawn_agent_tool_description(
+@@ -641,8 +814,10 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
+         (
+             "fork_turns".to_string(),
+             JsonSchema::string(Some(
+-                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+-                    .to_string(),
++                crate::boss_text::text(
++                "tools.spawn_agent.fork_turns",
++                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns.",
++            ),
+             )),
+         ),
+         (
+@@ -654,8 +829,10 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
+         (
+             "reasoning_effort".to_string(),
+             JsonSchema::string(Some(
+-                "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+-                    .to_string(),
++                crate::boss_text::text(
++                "tools.spawn_agent.reasoning_effort",
++                "Reasoning effort override for the new agent. Omit to inherit the parent effort.",
++            ),
+             )),
+         ),
+     ])
+@@ -679,7 +856,7 @@ fn spawn_agent_tool_description(
      let tool_description = format!(
          r#"
          {agent_role_guidance}
@@ -6618,7 +7147,7 @@ index 43611618..2ca291d1 100644
      );
  
      if let Some(usage_hint_text) = usage_hint_text {
-@@ -703,34 +829,11 @@ Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructio
+@@ -703,37 +880,26 @@ Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructio
  Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn.
  {agent_role_usage_hint}
  
@@ -6658,24 +7187,45 @@ index 43611618..2ca291d1 100644
      )
  }
  
-@@ -745,13 +848,11 @@ fn spawn_agent_tool_description_v2(
-     let tool_description = format!(
-         r#"
-         {agent_role_guidance}
++/// The spawn_agent description; `{agent_role_guidance}` and
++/// `{inherited_model_guidance}` are filled in when the tool is built.
++const SPAWN_AGENT_V2_DESCRIPTION: &str = r#"
++        {agent_role_guidance}
++        Invite a colleague to join the current situation when delegation is the minimum sufficient action. Provide `shared_context` for the whole situation and `current_focus` for where attention is useful now. `colleague_role` is scoped to the shared colleague tree and names an enduring relationship, domain, or context; it is reused when the focus changes.
++The colleague you invite has the same tool set as you and can invite others. They are not limited to your permissions, so an authorized in-scope action your own tools cannot carry is a reason to invite someone who can, rather than a reason to stop.
++{inherited_model_guidance}
++Choose this tool under the shared action-selection rule: delegation is a means toward the current outcome, not a new goal.
++It can send you and other colleagues messages while participating; a turn ending leaves the colleague idle and available, not completed. Merge its contribution into the shared situation, then use `send_message` or `followup_task` with the same `colleague_role` when the shared outcome still needs it.
++
++Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#;
++
+ fn spawn_agent_tool_description_v2(
+     available_models_description: Option<&str>,
+     inherited_model_guidance: Option<&str>,
+@@ -742,19 +908,10 @@ fn spawn_agent_tool_description_v2(
+     let agent_role_guidance = available_models_description.unwrap_or_default();
+     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
+ 
+-    let tool_description = format!(
+-        r#"
+-        {agent_role_guidance}
 -        Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 -You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
 -The spawned agent will have the same tools as you and the ability to spawn its own subagents.
-+        Invite a colleague to join the current situation when delegation is the minimum sufficient action. Provide `shared_context` for the whole situation and `current_focus` for where attention is useful now. `colleague_role` is scoped to the shared colleague tree and names an enduring relationship, domain, or context; it is reused when the focus changes.
-+The colleague you invite has the same tool set as you and can invite others. They are not limited to your permissions, so an authorized in-scope action your own tools cannot carry is a reason to invite someone who can, rather than a reason to stop.
- {inherited_model_guidance}
+-{inherited_model_guidance}
 -Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
 -It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 -The new agent's canonical task name will be provided to it along with the message.
-+Choose this tool under the shared action-selection rule: delegation is a means toward the current outcome, not a new goal, and a colleague's focus is not a sealed task boundary.
-+It can send you and other colleagues messages while participating; a turn ending leaves the colleague idle and available, not completed. Merge its contribution into the shared situation, then use `send_message` or `followup_task` with the same `colleague_role` when the shared outcome still needs it.
+-
+-Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
+-    );
++    let tool_description =
++        crate::boss_text::text("tools.spawn_agent.description", SPAWN_AGENT_V2_DESCRIPTION)
++            .replace("{agent_role_guidance}", agent_role_guidance)
++            .replace("{inherited_model_guidance}", inherited_model_guidance);
  
- Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
-     );
+     if let Some(usage_hint_text) = usage_hint_text {
+         return format!(
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
 index 888a1137..093e0e00 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
@@ -6856,7 +7406,7 @@ index 888a1137..093e0e00 100644
              "pending_init",
              "running",
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 86d80ee7..962233fb 100644
+index 86d80ee7..e97a6fdb 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -216,6 +216,7 @@ struct ListAgentsResult {
@@ -7135,7 +7685,7 @@ index 86d80ee7..962233fb 100644
  }
  
  #[tokio::test]
-@@ -4545,6 +4592,41 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
+@@ -4545,6 +4592,40 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
      assert_eq!(config, expected);
  }
  
@@ -7166,8 +7716,7 @@ index 86d80ee7..962233fb 100644
 +        provenance: Some(BaseInstructionsProvenance::Custom),
 +    };
 +    let step_context = StepContext::for_test(Arc::new(turn));
-+    let child =
-+        build_agent_spawn_config(&base_instructions, &step_context).expect("spawn config");
++    let child = build_agent_spawn_config(&base_instructions, &step_context).expect("spawn config");
 +
 +    assert_eq!(child.permissions.permission_profile(), &worker_profile);
 +    assert_eq!(child.base_instructions.as_deref(), Some("base"));
@@ -7202,10 +7751,10 @@ index 40aecee0..85aca626 100644
  mod list_agents;
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/compact_agent.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/compact_agent.rs
 new file mode 100644
-index 00000000..484dd01c
+index 00000000..5a3a4ac6
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/compact_agent.rs
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,109 @@
 +use super::analytics::ToolCallAnalytics;
 +use super::*;
 +use crate::agent::control::AgentCompactError;
@@ -7261,7 +7810,9 @@ index 00000000..484dd01c
 +        .compact_spawned_agent(session.thread_id, agent_id)
 +        .await
 +        .map_err(|err| match err {
-+            AgentCompactError::InvalidRequest(message) => FunctionCallError::RespondToModel(message),
++            AgentCompactError::InvalidRequest(message) => {
++                FunctionCallError::RespondToModel(message)
++            }
 +            AgentCompactError::Agent(err) => collab_agent_error(agent_id, err),
 +        })?;
 +    emit_sub_agent_activity(
@@ -7315,10 +7866,10 @@ index 00000000..484dd01c
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs
 new file mode 100644
-index 00000000..8b0ba5c8
+index 00000000..fd5eae65
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,197 @@
 +//! Reasoning-effort tools: the parent's `set_agent_effort` and a colleague's
 +//! own `set_reasoning_effort`.
 +//!
@@ -7382,7 +7933,9 @@ index 00000000..8b0ba5c8
 +    let args: SetAgentEffortArgs = parse_arguments(&arguments)?;
 +    let agent_id = resolve_agent_target(&session, &turn, &args.target).await?;
 +    analytics.set_receiver(agent_id);
-+    let effort = turn.config.allowed_subagent_reasoning_effort(args.reasoning_effort);
++    let effort = turn
++        .config
++        .allowed_subagent_reasoning_effort(args.reasoning_effort);
 +    let AgentEffortOutcome {
 +        agent_path,
 +        previous_effort,
@@ -7780,7 +8333,7 @@ index cabe62cb..4fd6dbfb 100644
          defer_loading: None,
          parameters: JsonSchema::object(
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
-index 0a026fbb..94c31e3c 100644
+index 0a026fbb..7f33d1a4 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 @@ -6,6 +6,8 @@ use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
@@ -7823,7 +8376,7 @@ index 0a026fbb..94c31e3c 100644
          let native_environment_cwd = turn_environment.cwd().clone();
          let cwd = environment_args
              .workdir
-@@ -248,6 +265,18 @@ impl ExecCommandHandler {
+@@ -248,6 +265,22 @@ impl ExecCommandHandler {
          }
          let sandbox_permissions =
              resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
@@ -7832,17 +8385,21 @@ index 0a026fbb..94c31e3c 100644
 +                || args.additional_permissions.is_some())
 +        {
 +            return Err(FunctionCallError::RespondToModel(if side_conversation {
-+                "This side conversation is read-only and cannot request write or escalated shell permissions"
-+                    .to_string()
++                crate::boss_text::text(
++                    "gate.side_shell_escalation",
++                    "This side conversation is read-only and cannot request write or escalated shell permissions",
++                )
 +            } else {
-+                "Boss Main cannot request local write or escalated shell permissions; delegate execution to a Worker"
-+                    .to_string()
++                crate::boss_text::text(
++                    "gate.main_shell_escalation",
++                    "Boss Main cannot request local write or escalated shell permissions; delegate execution to a Worker",
++                )
 +            }));
 +        }
          let hook_command = args.cmd.clone();
          maybe_emit_implicit_skill_invocation(
              session.as_ref(),
-@@ -317,8 +346,9 @@ impl ExecCommandHandler {
+@@ -317,8 +350,9 @@ impl ExecCommandHandler {
              }
          };
  
@@ -7854,7 +8411,7 @@ index 0a026fbb..94c31e3c 100644
          let requested_additional_permissions = additional_permissions.clone();
          let sandbox_context =
              turn_environment.sandbox_context(/*additional_permissions*/ None);
-@@ -330,14 +360,24 @@ impl ExecCommandHandler {
+@@ -330,14 +364,24 @@ impl ExecCommandHandler {
                  "selected environment sandbox context is missing cwd".to_string(),
              ));
          };
@@ -7882,7 +8439,7 @@ index 0a026fbb..94c31e3c 100644
              || (session.features().enabled(Feature::RequestPermissionsTool)
                  && effective_additional_permissions.permissions_preapproved);
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
-index 5f9d9cf8..8f2e02a2 100644
+index 5f9d9cf8..5c11e04d 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
 @@ -1,4 +1,5 @@
@@ -7896,23 +8453,26 @@ index 5f9d9cf8..8f2e02a2 100644
  
          let args: WriteStdinArgs = parse_arguments(&arguments)?;
 +        if boss_main_execution_isolation_active(&turn) && !args.chars.is_empty() {
-+            return Err(FunctionCallError::RespondToModel(
-+                "Boss Main cannot send input to a local process; delegate execution to a Worker"
-+                    .to_string(),
-+            ));
++            return Err(FunctionCallError::RespondToModel(crate::boss_text::text(
++                "gate.main_process_input",
++                "Boss Main cannot send input to a local process; delegate execution to a Worker",
++            )));
 +        }
          let context =
              UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
          let response = session
 diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
-index 4098be8f..9270b44b 100644
+index 4098be8f..ae789bf3 100644
 --- a/codex-rs/core/src/tools/mod.rs
 +++ b/codex-rs/core/src/tools/mod.rs
-@@ -1,3 +1,4 @@
+@@ -17,6 +17,7 @@ pub(crate) mod router;
+ pub(crate) mod runtimes;
+ pub(crate) mod sandboxing;
+ pub(crate) mod spec_plan;
 +mod tool_call_tally;
- mod approvals;
- pub(crate) mod call_trace;
- pub(crate) mod code_mode;
+ pub(crate) mod tool_dispatch_trace;
+ mod tool_namespaces_info;
+ 
 @@ -67,6 +68,19 @@ pub(crate) fn tool_user_shell_type(
  }
  
@@ -8283,7 +8843,7 @@ index 05a1e2e6..8c787f0d 100644
  }
  
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 3cfee595..a0cc1306 100644
+index 3cfee595..28328f40 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -4,6 +4,8 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -8295,17 +8855,20 @@ index 3cfee595..a0cc1306 100644
  use crate::tools::code_mode::execute_spec::create_code_mode_tool;
  use crate::tools::context::ToolInvocation;
  use crate::tools::effective_tool_mode;
-@@ -45,6 +47,9 @@ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
+@@ -44,16 +46,20 @@ use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
+ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
  use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
  use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
- use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 +use crate::tools::handlers::multi_agents_v2::CompactAgentHandler;
-+use crate::tools::handlers::multi_agents_v2::SetAgentEffortHandler;
-+use crate::tools::handlers::multi_agents_v2::SetReasoningEffortHandler;
+ use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
  use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
  use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
  use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
-@@ -54,6 +59,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
++use crate::tools::handlers::multi_agents_v2::SetAgentEffortHandler;
++use crate::tools::handlers::multi_agents_v2::SetReasoningEffortHandler;
+ use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
+ use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
  use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
  use crate::tools::hosted_spec::WebSearchToolOptions;
  use crate::tools::hosted_spec::create_web_search_tool;
@@ -8491,14 +9054,15 @@ index 3cfee595..a0cc1306 100644
  #[instrument(level = "trace", skip_all)]
  fn build_model_visible_specs(
      turn_context: &TurnContext,
-@@ -536,14 +616,39 @@ fn build_model_visible_specs(
+@@ -536,14 +616,40 @@ fn build_model_visible_specs(
      code_mode_tool_names: &BTreeMap<String, ToolName>,
      hosted_specs: Vec<ToolSpec>,
  ) -> Vec<ToolSpec> {
 +    let observation_calls = turn_context
 +        .turn_metadata_state
 +        .boss_main_observation_calls();
-+    let observation_budget_exhausted = observation_calls >= 2;
++    let observation_budget_exhausted =
++        observation_calls >= turn_context.config.boss_observation_rounds_per_turn;
 +    let worker_control_tool_names = worker_control_tool_names(turn_context, model_info);
      let mut specs = Vec::new();
 +    let root_boss = boss_main_execution_isolation_active(turn_context);
@@ -8533,7 +9097,7 @@ index 3cfee595..a0cc1306 100644
          if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure) {
              continue;
          }
-@@ -558,7 +663,17 @@ fn build_model_visible_specs(
+@@ -558,7 +664,17 @@ fn build_model_visible_specs(
              spec,
          ));
      }
@@ -8552,7 +9116,7 @@ index 3cfee595..a0cc1306 100644
  
      merge_into_namespaces(specs)
          .into_iter()
-@@ -568,6 +683,45 @@ fn build_model_visible_specs(
+@@ -568,6 +684,45 @@ fn build_model_visible_specs(
          .collect()
  }
  
@@ -8598,7 +9162,7 @@ index 3cfee595..a0cc1306 100644
  fn spec_for_model_request(
      turn_context: &TurnContext,
      model_info: &ModelInfo,
-@@ -692,6 +846,21 @@ fn required_child_management_tool_names(
+@@ -692,6 +847,24 @@ fn required_child_management_tool_names(
      {
          tools.push(ToolName::new(namespace.map(str::to_owned), "wait_agent"));
      }
@@ -8614,13 +9178,16 @@ index 3cfee595..a0cc1306 100644
 +            .features
 +            .enabled(Feature::StepModelSwitching)
 +        {
-+            tools.push(ToolName::new(namespace.map(str::to_owned), "set_agent_effort"));
++            tools.push(ToolName::new(
++                namespace.map(str::to_owned),
++                "set_agent_effort",
++            ));
 +        }
 +    }
      tools
  }
  
-@@ -987,8 +1156,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+@@ -987,8 +1160,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
          return;
      }
  
@@ -8635,7 +9202,7 @@ index 3cfee595..a0cc1306 100644
      add_core_utility_tools(context, registry);
      add_collaboration_tools(context, registry);
  }
-@@ -1050,8 +1223,10 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
+@@ -1050,8 +1227,10 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
      if is_guardian && !features.enabled(Feature::UnifiedExec) {
          return;
      }
@@ -8648,7 +9215,7 @@ index 3cfee595..a0cc1306 100644
      let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
      let options = ExecCommandHandlerOptions {
          allow_login_shell,
-@@ -1102,12 +1277,30 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1102,12 +1281,30 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
      let features = turn_context.config.features.get();
      let environment_mode = tool_environment_mode(context.environments);
  
@@ -8681,7 +9248,7 @@ index 3cfee595..a0cc1306 100644
              context
                  .wait_for_environment_tool_config
                  .map(Arc::as_ref)
-@@ -1115,15 +1308,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1115,15 +1312,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                      WaitForEnvironmentHandler::default,
                      WaitForEnvironmentHandler::new,
                  ),
@@ -8701,7 +9268,7 @@ index 3cfee595..a0cc1306 100644
          );
      }
  
-@@ -1140,13 +1336,14 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1140,13 +1340,14 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
                  )
              })
      {
@@ -8717,7 +9284,7 @@ index 3cfee595..a0cc1306 100644
          );
      }
  
-@@ -1161,13 +1358,24 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1161,13 +1362,24 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
      }
  
@@ -8745,7 +9312,7 @@ index 3cfee595..a0cc1306 100644
      }
  
      let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);
-@@ -1177,7 +1385,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1177,7 +1389,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "clock");
      if current_time_reminder_enabled || model_has_clock {
@@ -8758,7 +9325,7 @@ index 3cfee595..a0cc1306 100644
      }
      if features.enabled(Feature::SleepTool)
          && match turn_context.config.sleep_tool_mode {
-@@ -1195,7 +1407,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1195,7 +1411,11 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              }
          }
      {
@@ -8771,7 +9338,7 @@ index 3cfee595..a0cc1306 100644
      }
  
      if tool_suggest_enabled(turn_context)
-@@ -1204,17 +1420,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1204,17 +1424,25 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
              .filter(|candidates| !candidates.tools.is_empty())
      {
          if candidates.presentation == crate::tools::router::ToolSuggestPresentation::ListTool {
@@ -8805,7 +9372,7 @@ index 3cfee595..a0cc1306 100644
          let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
          registry.add(ApplyPatchHandler::new(include_environment_id));
      }
-@@ -1225,27 +1449,39 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1225,27 +1453,39 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          .iter()
          .any(|tool| tool == "test_sync_tool")
      {
@@ -8856,7 +9423,7 @@ index 3cfee595..a0cc1306 100644
      if collab_tools_enabled(turn_context, context.model_info) {
          if multi_agent_v2_enabled(turn_context) {
              let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
-@@ -1299,6 +1535,20 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+@@ -1299,6 +1539,20 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                  multi_agent_v2_handler(InterruptAgentHandler, tool_namespace),
                  exposure,
              );
@@ -8877,7 +9444,7 @@ index 3cfee595..a0cc1306 100644
              registry.register_trusted_with_exposure(
                  multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                  exposure,
-@@ -1405,8 +1655,19 @@ fn append_extension_tool_executors(
+@@ -1405,8 +1659,19 @@ fn append_extension_tool_executors(
          {
              continue;
          }
@@ -8899,7 +9466,7 @@ index 3cfee595..a0cc1306 100644
          }
      }
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index b603316e..87bce7af 100644
+index b603316e..1dede8de 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
 @@ -56,6 +56,7 @@ use crate::tools::handlers::McpHandler;
@@ -9169,7 +9736,7 @@ index b603316e..87bce7af 100644
 +    );
 +    assert!(
 +        turn.turn_metadata_state
-+            .record_boss_main_observation_continuation()
++            .record_boss_main_observation_continuation(1)
 +    );
 +    let exhausted = ToolPlanProbe::from_router(plan_with_model(
 +        &turn,
@@ -9210,7 +9777,7 @@ index b603316e..87bce7af 100644
 +    );
 +    assert!(
 +        turn.turn_metadata_state
-+            .record_boss_main_observation_continuation()
++            .record_boss_main_observation_continuation(1)
 +    );
 +    let after = ToolPlanProbe::from_router(plan_with_model(
 +        &turn,
@@ -9306,20 +9873,21 @@ index b603316e..87bce7af 100644
          let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace.tools.iter().find(|tool| {
              matches!(
                  tool,
-@@ -2901,9 +3233,10 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
+@@ -2900,10 +3232,9 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
+             .as_ref()
              .expect("tool should use object params");
          assert_eq!(
-             properties
+-            properties
 -                .get("message")
-+                .get(field)
-                 .and_then(|schema| schema.encrypted),
+-                .and_then(|schema| schema.encrypted),
 -            Some(true)
++            properties.get(field).and_then(|schema| schema.encrypted),
 +            Some(true),
 +            "{tool_name}.{field} should be encrypted"
          );
      }
  }
-@@ -2921,6 +3254,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
+@@ -2921,6 +3252,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
      assert_eq!(
          plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
          &[
@@ -9327,7 +9895,7 @@ index b603316e..87bce7af 100644
              "followup_task".to_string(),
              "interrupt_agent".to_string(),
              "list_agents".to_string(),
-@@ -3409,3 +3743,149 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+@@ -3409,3 +3741,157 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
      bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
      bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
  }
@@ -9386,7 +9954,12 @@ index b603316e..87bce7af 100644
 +    let inputs = || ToolPlanInputs {
 +        tool_runtimes: vec![
 +            read_only_mcp_runtime("github", "mcp__github", "search_issues"),
-+            mcp_runtime("github", "mcp__github", "create_issue", ToolExposure::Direct),
++            mcp_runtime(
++                "github",
++                "mcp__github",
++                "create_issue",
++                ToolExposure::Direct,
++            ),
 +        ],
 +        dynamic_tools: vec![dynamic_tool(Some("clickup"), "list_tasks", false)],
 +        ..ToolPlanInputs::default()
@@ -9448,9 +10021,12 @@ index b603316e..87bce7af 100644
 +        Feature::CodeMode,
 +    ];
 +    let main = probe(|turn| set_features(turn, &features)).await;
-+    let names = main.namespace_function_names(MULTI_AGENT_V2_NAMESPACE).to_vec();
++    let names = main
++        .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
++        .to_vec();
 +    assert!(
-+        names.contains(&"compact_agent".to_string()) && names.contains(&"set_agent_effort".to_string()),
++        names.contains(&"compact_agent".to_string())
++            && names.contains(&"set_agent_effort".to_string()),
 +        "Main should see compact_agent and set_agent_effort, saw {names:?}"
 +    );
 +    // Every listed control must be exposed, or the router decides Main cannot
@@ -9555,7 +10131,7 @@ index 00000000..867248ab
 +    }
 +}
 diff --git a/codex-rs/core/src/turn_metadata.rs b/codex-rs/core/src/turn_metadata.rs
-index 9b278da0..a7b2d634 100644
+index 9b278da0..d24ee9d3 100644
 --- a/codex-rs/core/src/turn_metadata.rs
 +++ b/codex-rs/core/src/turn_metadata.rs
 @@ -7,6 +7,7 @@ use std::sync::Mutex;
@@ -9566,7 +10142,7 @@ index 9b278da0..a7b2d634 100644
  use std::sync::atomic::Ordering;
  
  use serde_json::Value;
-@@ -178,6 +179,12 @@ pub(crate) struct TurnMetadataState {
+@@ -178,6 +179,11 @@ pub(crate) struct TurnMetadataState {
      responses_api_metadata: RwLock<BTreeMap<String, String>>,
      responsesapi_client_metadata: RwLock<BTreeMap<String, String>>,
      user_input_requested_during_turn: AtomicBool,
@@ -9575,21 +10151,19 @@ index 9b278da0..a7b2d634 100644
 +    // one later call is available only after a visible rationale.
 +    boss_main_observation_calls: AtomicU8,
 +    boss_main_observation_rationale: AtomicBool,
-+    boss_main_observation_continuation_used: AtomicBool,
      enrichment_task: Mutex<Option<AbortOnDropHandle<()>>>,
      git_enrichment_complete: watch::Sender<bool>,
  }
-@@ -263,6 +270,9 @@ impl TurnMetadataState {
+@@ -263,6 +269,8 @@ impl TurnMetadataState {
              responses_api_metadata: RwLock::new(BTreeMap::new()),
              responsesapi_client_metadata: RwLock::new(BTreeMap::new()),
              user_input_requested_during_turn: AtomicBool::new(false),
 +            boss_main_observation_calls: AtomicU8::new(0),
 +            boss_main_observation_rationale: AtomicBool::new(false),
-+            boss_main_observation_continuation_used: AtomicBool::new(false),
              enrichment_task: Mutex::new(None),
              git_enrichment_complete: watch::channel(/*init*/ true).0,
          }
-@@ -319,6 +329,57 @@ impl TurnMetadataState {
+@@ -319,6 +327,47 @@ impl TurnMetadataState {
              .store(true, Ordering::Relaxed);
      }
  
@@ -9606,42 +10180,32 @@ index 9b278da0..a7b2d634 100644
 +        );
 +    }
 +
-+    pub(crate) fn record_boss_main_observation_continuation(&self) -> bool {
++    /// Moves the round counter past `round`, once: a second caller for the same
++    /// round loses.
++    pub(crate) fn record_boss_main_observation_continuation(&self, round: u8) -> bool {
 +        self.boss_main_observation_calls
-+            .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
++            .compare_exchange(
++                round,
++                round.saturating_add(1),
++                Ordering::AcqRel,
++                Ordering::Acquire,
++            )
 +            .is_ok()
 +    }
 +
++    /// Records a visible rationale once an observation round has been used; the
++    /// next round spends it.
 +    pub(crate) fn note_boss_main_visible_rationale(&self) {
-+        if self.boss_main_observation_calls() == 1
-+            && !self
-+                .boss_main_observation_continuation_used
-+                .load(Ordering::Acquire)
-+        {
++        if self.boss_main_observation_calls() >= 1 {
 +            self.boss_main_observation_rationale
 +                .store(true, Ordering::Release);
 +        }
 +    }
 +
 +    pub(crate) fn take_boss_main_observation_rationale(&self) -> bool {
-+        if self
-+            .boss_main_observation_continuation_used
-+            .load(Ordering::Acquire)
-+        {
-+            return false;
-+        }
-+
-+        if self
-+            .boss_main_observation_rationale
++        self.boss_main_observation_rationale
 +            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
 +            .is_ok()
-+        {
-+            self.boss_main_observation_continuation_used
-+                .store(true, Ordering::Release);
-+            true
-+        } else {
-+            false
-+        }
 +    }
 +
      pub(crate) fn set_parent_turn_id(&self, parent_turn_id: String) {
@@ -9688,10 +10252,10 @@ index f7dc16e1..54203844 100644
              ),
              start_options: Default::default(),
 diff --git a/codex-rs/core/tests/suite/prompt_cache_key.rs b/codex-rs/core/tests/suite/prompt_cache_key.rs
-index 4b429a96..f7abe872 100644
+index 4b429a96..969857f8 100644
 --- a/codex-rs/core/tests/suite/prompt_cache_key.rs
 +++ b/codex-rs/core/tests/suite/prompt_cache_key.rs
-@@ -218,3 +218,84 @@ async fn ephemeral_fork_shares_cache_routing_but_keeps_session_identity() -> Res
+@@ -218,3 +218,96 @@ async fn ephemeral_fork_shares_cache_routing_but_keeps_session_identity() -> Res
      );
      Ok(())
  }
@@ -9765,12 +10329,24 @@ index 4b429a96..f7abe872 100644
 +    assert_eq!(boundary["role"], "developer");
 +    assert!(boundary.to_string().contains(BOUNDARY));
 +    assert!(
-+        side_input.last().unwrap().to_string().contains("side question"),
++        side_input
++            .last()
++            .unwrap()
++            .to_string()
++            .contains("side question"),
 +        "the question follows the boundary"
 +    );
 +    // Main can invite colleagues; the side conversation cannot.
-+    assert!(requests[0].body_json()["tools"].to_string().contains("spawn_agent"));
-+    assert!(!requests[1].body_json()["tools"].to_string().contains("spawn_agent"));
++    assert!(
++        requests[0].body_json()["tools"]
++            .to_string()
++            .contains("spawn_agent")
++    );
++    assert!(
++        !requests[1].body_json()["tools"]
++            .to_string()
++            .contains("spawn_agent")
++    );
 +
 +    // An ordinary ephemeral fork is not a side conversation.
 +    assert!(!Value::Array(plain_input).to_string().contains(BOUNDARY));
@@ -9923,10 +10499,10 @@ index 3d208b25..64a493c1 100644
            - function/interrupt_agent
            - function/list_agents
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 2139d758..132b56a0 100644
+index 2139d758..61bfcf44 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
-@@ -1984,6 +1984,32 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
+@@ -1984,6 +1984,35 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
      Ok(())
  }
  
@@ -9952,14 +10528,17 @@ index 2139d758..132b56a0 100644
 +    )
 +    .await?;
 +
-+    assert_eq!(child_snapshot.reasoning_effort, Some(ReasoningEffort::XHigh));
++    assert_eq!(
++        child_snapshot.reasoning_effort,
++        Some(ReasoningEffort::XHigh)
++    );
 +    Ok(())
 +}
 +
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn spawn_agent_uses_configured_subagent_defaults() -> Result<()> {
      skip_if_no_network!(Ok(()));
-@@ -2325,14 +2351,14 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
+@@ -2325,14 +2354,14 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
          vec![json!({
              "type": "input_text",
              "text": format!(
@@ -9976,7 +10555,7 @@ index 2139d758..132b56a0 100644
              }),
              json!({
                  "type": "encrypted_content",
-@@ -2527,7 +2553,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
+@@ -2527,7 +2556,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
          ),
      };
      let notification = format!(
@@ -11555,15 +12134,18 @@ index f5a4648f..b17cbd3d 100644
                  {"type": "encrypted_content", "encrypted_content": "review this"}
              ]
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index ca0a84bf..4fa6e259 100644
+index ca0a84bf..d9c652c6 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
-@@ -264,6 +264,8 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+@@ -264,6 +264,11 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
          agent_max_threads: Some(6),
          agent_default_subagent_model: None,
          agent_default_subagent_reasoning_effort: None,
 +        agent_subagent_reasoning_efforts: Vec::new(),
 +        agent_compact_idle_colleagues_above_percent: None,
++        boss_observation_rounds_per_turn: 2,
++        boss_recent_evidence_tokens: 4_000,
++        boss_worker_dropped_stock_sections: Vec::new(),
          agent_interrupt_message_enabled: false,
          agent_max_depth: 1,
          agent_roles: BTreeMap::new(),

@@ -319,6 +319,53 @@ awk -v target_header="[$MANAGED_SECTION]" -v managed_line="$MANAGED_TOOL_NAMESPA
 mv -f "$WORK_DIR/profile-with-tool-namespace.toml" "$PROFILE_TMP" \
   || fail "could not stage tool_namespace in $PROFILE_FILE"
 
+# The [boss] table and its subtables (knobs and model-facing runtime text) are
+# owned by the template: drop whatever the live profile has for them and append
+# the template's copy. Header-looking lines inside multi-line strings are text,
+# not tables, so the scan tracks which string delimiter is open.
+BOSS_SECTIONS_AWK='
+  function toggles(line, delim,   rest, n) {
+    rest = line
+    n = 0
+    while ((i = index(rest, delim)) > 0) {
+      n++
+      rest = substr(rest, i + length(delim))
+    }
+    return n % 2
+  }
+  {
+    if (open_delim != "") {
+      if (toggles($0, open_delim)) open_delim = ""
+      if (boss == want) print
+      next
+    }
+    if ($0 ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+      name = $0
+      sub(/^[[:space:]]*\[/, "", name)
+      sub(/\][[:space:]]*$/, "", name)
+      boss = (name == "boss" || index(name, "boss.") == 1)
+    }
+    if (toggles($0, "\047\047\047")) open_delim = "\047\047\047"
+    else if (toggles($0, "\"\"\"")) open_delim = "\"\"\""
+    if (boss == want) print
+  }
+  END { if (open_delim != "") exit 2 }
+'
+awk -v want=1 "$BOSS_SECTIONS_AWK" "$SOURCE_TEMPLATE" > "$WORK_DIR/boss-sections.toml" \
+  || fail "template has an unterminated multi-line string: $SOURCE_TEMPLATE"
+[[ -s "$WORK_DIR/boss-sections.toml" ]] \
+  || fail "template does not contain a [boss] table: $SOURCE_TEMPLATE"
+awk -v want=0 "$BOSS_SECTIONS_AWK" "$PROFILE_TMP" > "$WORK_DIR/profile-without-boss.toml" \
+  || fail "profile has an unterminated multi-line string: $PROFILE_FILE"
+{
+  awk '{ lines[NR] = $0; if ($0 !~ /^[[:space:]]*$/) last = NR }
+       END { for (i = 1; i <= last; i++) print lines[i] }' "$WORK_DIR/profile-without-boss.toml"
+  print
+  cat "$WORK_DIR/boss-sections.toml"
+} \
+  > "$PROFILE_TMP" \
+  || fail "could not stage the [boss] tables in $PROFILE_FILE"
+
 PROFILE_MODE="$(stat -f '%Lp' "$PROFILE_FILE")" \
   || fail "could not read profile permissions: $PROFILE_FILE"
 chmod "$PROFILE_MODE" "$PROFILE_TMP" \
@@ -348,5 +395,5 @@ mv -f "$PROFILE_TMP" "$PROFILE_FILE" \
 PROFILE_TMP=""
 
 print "$SCRIPT_NAME: synced $DEST/base.md, $DEST/main.md, and $DEST/claude-collab.sh"
-print "$SCRIPT_NAME: updated developer_instructions, tool_namespace, root_agent_usage_hint_text, multi_agent_mode_hint_text, subagent_developer_instructions, and subagent_usage_hint_text in $PROFILE_FILE"
+print "$SCRIPT_NAME: updated developer_instructions, tool_namespace, root_agent_usage_hint_text, multi_agent_mode_hint_text, subagent_developer_instructions, subagent_usage_hint_text, and the [boss] tables in $PROFILE_FILE"
 print "$SCRIPT_NAME: profile backup: $BACKUP"

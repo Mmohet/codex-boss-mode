@@ -101,6 +101,135 @@ subagent_reasoning_efforts = ["xhigh", "max"]
 # Same binary requirement as the key above.
 compact_idle_colleagues_above_percent = 40
 
+[boss]
+# Boss runtime knobs, and every piece of model-facing text the Boss runtime
+# writes (tool descriptions, message envelopes, gate replies). Edit them here:
+# scripts/sync-profile.sh copies both tables into the live profile on every
+# launch, so a restart applies a change without a rebuild. A key left out keeps
+# the built-in text. Words in braces, like {current_focus}, are filled in by the
+# runtime and should stay. Needs a Boss binary built from the
+# rust-v0.155.0-alpha.16 patch or later; an older one rejects this table.
+# Observation rounds Boss main may take in one turn. The first is free; each
+# later one needs a visible rationale first.
+observation_rounds_per_turn = 2
+# Newest technical tool output, in estimated tokens, that Boss main keeps
+# verbatim; older output becomes a placeholder that says how to reopen it.
+recent_evidence_tokens = 4000
+# Stock-prompt sections a worker does not receive, by exact heading.
+worker_dropped_stock_sections = [
+  "# Autonomy and persistence",
+  "## Intermediate commentary",
+  "## Final answer",
+]
+
+[boss.text]
+"tools.compact_agent.description" = '''
+Ask a colleague to compact its own context: it keeps the thread, its identity and its understanding of the work, and drops the transcript weight behind them. Use this instead of replacing a colleague that has grown heavy — a new one starts light but has to rebuild its picture of the project before it can help, and that rebuild is the expensive part. Judge by the situation, not by arithmetic. It is usually worth compacting when a colleague has just finished something whole — shipped a PR, closed out a phase, handed back a conclusion — because that is when the detail behind it stops being needed. `list_agents` reports each colleague's `context_used_percent`; treat it as one input among several, weighted by what the colleague is in the middle of. Around 60% it is worth doing at the next natural break. Around 75% it is worth doing soon even mid-task, because every later step is being charged at that size. Past 85% the runtime will compact on its own shortly, which costs more than choosing the moment yourself. A colleague well under half full, or one partway through something it cannot easily resume, is usually better left alone. Compacting costs one summarizing turn and a few seconds; the colleague continues from where it was.'''
+"tools.compact_agent.target" = '''
+Agent id or stable colleague role from spawn_agent.'''
+"tools.followup_task.description" = '''
+Continue working with an existing non-root colleague and trigger a turn if it is idle. If the colleague is already running, deliver the message at a safe sampling boundary without starting a concurrent turn. This cannot target the root colleague and is rejected if you try; use send_message to reach root.'''
+"tools.followup_task.message" = '''
+What you are bringing back to this colleague: what has developed since, and what now matters. They still hold the understanding they built earlier, so continue that thread rather than restating the work as a fresh assignment.'''
+"tools.followup_task.reasoning_effort" = '''
+The colleague's effort from here on. Every follow-up is the moment to set it again: match what this next stretch asks for, not what the colleague was first invited for. Omit to keep its current level; changing it keeps the colleague's cache.'''
+"tools.followup_task.target" = '''
+The colleague to continue with: agent id or stable colleague role returned by spawn_agent. Reuse the same role when the focus changes.'''
+"tools.interrupt_agent.description" = '''
+Interrupt a colleague's current turn, if any, and return its previous status. The colleague remains available for messages and follow-up turns.'''
+"tools.interrupt_agent.target" = '''
+Agent id or stable colleague role from spawn_agent.'''
+"tools.list_agents.description" = '''
+List open colleagues in the current root thread tree, including idle and unloaded colleagues that remain available. Optionally filter by colleague-path prefix.'''
+"tools.list_agents.path_prefix" = '''
+Colleague-path prefix filter without a trailing slash. Omit to list all open colleagues.'''
+"tools.send_message.description" = '''
+Send a message to an existing colleague. It is delivered at the next safe sampling boundary when the colleague is running, and wakes the same open colleague for another turn when idle. It does not start a concurrent turn. This is also how you reach the root colleague: a message to root is delivered without waking it, so root sees it on its next turn or through wait_agent.'''
+"tools.send_message.message" = '''
+What you want this colleague to know: a new fact, something that changed, or what you are now thinking. Write it as you would to a person who already shares the situation.'''
+"tools.send_message.target" = '''
+Agent id or stable colleague role from spawn_agent.'''
+"tools.set_agent_effort.description" = '''
+Change a colleague's reasoning effort without sending new work. It takes effect from the colleague's next step, including in a turn already under way, and stays for later turns. Come back to it whenever `wait_agent` shows the work no longer matches the colleague's `reasoning_effort` — a long run of routine commands at a high level, or a colleague going round on something hard at a low one. Changing it keeps the colleague's cache.'''
+"tools.set_agent_effort.reasoning_effort" = '''
+The new level.'''
+"tools.set_agent_effort.target" = '''
+Agent id or stable colleague role from spawn_agent.'''
+"tools.set_reasoning_effort.description" = '''
+Change your own reasoning effort for the rest of this turn. Come back to it whenever the step in front of you changes weight: raise it on reaching something that needs care — a subtle bug, a design choice, a result that does not add up — and lower it once what is left is routine. Your next turn starts again at the level you were given. Changing it keeps your cache.'''
+"tools.set_reasoning_effort.reasoning_effort" = '''
+The new level.'''
+"tools.spawn_agent.colleague_role" = '''
+Persistent colleague relationship, domain, or context used to continue the same colleague. Do not name it after the current action, query, deliverable, or phase. Use lowercase letters, digits, and underscores.'''
+"tools.spawn_agent.current_focus" = '''
+What this colleague is needed for now; it can change on a follow-up. Plain text.'''
+"tools.spawn_agent.description" = '''
+
+        {agent_role_guidance}
+        Invite a colleague to join the current situation when delegation is the minimum sufficient action. Provide `shared_context` for the whole situation and `current_focus` for where attention is useful now. `colleague_role` is scoped to the shared colleague tree and names an enduring relationship, domain, or context; it is reused when the focus changes.
+The colleague you invite has the same tool set as you and can invite others. They are not limited to your permissions, so an authorized in-scope action your own tools cannot carry is a reason to invite someone who can, rather than a reason to stop.
+{inherited_model_guidance}
+Choose this tool under the shared action-selection rule: delegation is a means toward the current outcome, not a new goal.
+It can send you and other colleagues messages while participating; a turn ending leaves the colleague idle and available, not completed. Merge its contribution into the shared situation, then use `send_message` or `followup_task` with the same `colleague_role` when the shared outcome still needs it.
+
+Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context.'''
+"tools.spawn_agent.fork_turns" = '''
+Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns.'''
+"tools.spawn_agent.reasoning_effort" = '''
+Reasoning effort override for the new agent. Omit to inherit the parent effort.'''
+"tools.spawn_agent.shared_context" = '''
+The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. It is there so the colleague understands why the focus matters. Plain text.'''
+"tools.wait_agent.description" = '''
+Wait for a mailbox update from any open colleague, including queued messages and turn-completion notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which colleagues have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.'''
+"envelope.default_focus" = '''
+Contribute wherever your judgment can change the shared outcome.'''
+"envelope.final_answer_note" = '''
+Turn state: idle; colleague remains available.
+This is the colleague's report; the user will see only the result.'''
+"envelope.joining" = '''
+Join the shared situation as a colleague.
+
+Shared context (current result, situation, constraints, and uncertainties):
+{shared_context}
+
+Current focus (where attention is useful now and may change):
+{current_focus}
+
+Tell the lead the choices that shape the result as you make them.
+When this turn ends, remain available to continue the shared situation.'''
+"envelope.joining_encrypted" = '''
+Join the shared situation as a colleague.
+
+Current focus (where attention is useful now and may change):
+{current_focus}
+
+Tell the lead the choices that shape the result as you make them.
+The encrypted content below is the shared situation. When this turn ends, remain available to continue it.'''
+"gate.main_code_execution" = '''
+Boss Main cannot execute local code directly; delegate substantial execution to a Worker'''
+"gate.main_file_edit" = '''
+Boss Main does not modify local files directly; delegate substantial execution to a Worker'''
+"gate.main_process_input" = '''
+Boss Main cannot send input to a local process; delegate execution to a Worker'''
+"gate.main_shell_escalation" = '''
+Boss Main cannot request local write or escalated shell permissions; delegate execution to a Worker'''
+"gate.observation_exhausted" = '''
+Direct observation is exhausted for this turn. Delegate any further investigation to a worker.'''
+"gate.observation_needs_rationale" = '''
+Direct observation is unavailable for this turn. First write a visible rationale explaining why one more observation is necessary, or delegate the investigation to a worker.'''
+"gate.side_file_edit" = '''
+This side conversation is read-only and does not modify files'''
+"gate.side_shell_escalation" = '''
+This side conversation is read-only and cannot request write or escalated shell permissions'''
+"side.boundary" = '''
+Side conversation. Everything above is the main conversation, carried over for reference: it is not your task, and you are not its lead here. Nothing said here goes back to it. The user is asking questions. Answer each in as few steps as will settle it, most often straight from what is already above; look something up only when the answer truly depends on it. Everything here is read-only and there are no colleagues: do not continue the main conversation's work or reach anyone in it.'''
+"evidence.omitted_placeholder" = '''
+[Earlier technical output omitted from active context. Call ID: {call_id}. Original output remains in this thread's session log; reopen by call ID or rerun the tool call above if needed.]'''
+"connectors.intro" = '''
+
+Sources you can reach in this session. Each description is the one the source provides for itself.
+'''
+
 [features]
 # Send a custom base as a real replacement instead of letting Responses Lite
 # demote it to an additive input under the service's own Codex identity.

@@ -12,6 +12,19 @@ RUN_CARGO=0
 git -C "$REPO_ROOT" diff --check
 "$REPO_ROOT/scripts/test-claude-collab.sh"
 
+# The [boss] tables sync from the template into the live profile on every
+# launch; a second sync must change nothing, and exactly one copy must remain.
+sync_home="$(mktemp -d "${TMPDIR:-/tmp}/boss-sync-test.XXXXXX")"
+cp "$REPO_ROOT/boss.config.example.toml" "$sync_home/boss.config.toml"
+CODEX_HOME="$sync_home" "$REPO_ROOT/scripts/sync-profile.sh" >/dev/null
+cp "$sync_home/boss.config.toml" "$sync_home/first-sync.toml"
+CODEX_HOME="$sync_home" "$REPO_ROOT/scripts/sync-profile.sh" >/dev/null
+cmp -s "$sync_home/first-sync.toml" "$sync_home/boss.config.toml" \
+  || { print -u2 "$SCRIPT_NAME: a second profile sync changed the profile"; exit 1; }
+[[ "$(grep -c '^\[boss\.text\]$' "$sync_home/boss.config.toml")" == 1 ]] \
+  || { print -u2 "$SCRIPT_NAME: profile sync did not leave exactly one [boss.text] table"; exit 1; }
+print "$SCRIPT_NAME: profile sync keeps one [boss] copy and is idempotent"
+
 MANIFEST="$REPO_ROOT/.boss/workspace.local.toml"
 manifest_value() {
   awk -v key="$1" '
