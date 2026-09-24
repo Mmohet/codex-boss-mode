@@ -92,8 +92,10 @@ network only for new dependencies. Set `BOSS_UPSTREAM_URL` to use a mirror.
 Budget several GB of free disk; the scripts refuse to start below 25 GB free
 (`BOSS_MIN_FREE_GB`).
 
-Nothing here calls any service at runtime beyond what Codex itself already
-does. The prompts and config are local files.
+The setup/build scripts do not make AI service calls. The separate Claude
+collaboration helper sends its task packet and any files Claude reads to the
+Claude Code account only when a user or authorized worker explicitly invokes
+it. See [the handoff guide](docs/claude-collaboration.md).
 
 **The build is slow on purpose.** It runs at low scheduling priority with
 throttled disk I/O and few parallel jobs, so the machine stays usable. Expect
@@ -181,8 +183,15 @@ boss.config.example.toml    profile overlay; copy to $CODEX_HOME/boss.config.tom
 bin/codex-boss              launch Codex Desktop in Boss Mode
 bin/codex-normal            launch it normally
 patches/<tag>/              source patch against that upstream tag
-scripts/                    install, build, update, check-state, test, prompt-diff
+scripts/                    install, build, update, checks, Claude handoff
 ```
+
+For an explicit Claude Code second opinion or isolated code edit, see
+[`docs/claude-collaboration.md`](docs/claude-collaboration.md). The helper does
+not auto-route tasks, and edit results stay in an unmerged Git worktree.
+`scripts/install-config.sh` installs it to
+`$CODEX_HOME/boss/claude-collab.sh`; a normal Boss launch keeps that copy in
+sync.
 
 No Codex source is vendored here and no compiled binary is distributed. The
 patch is applied to a checkout you fetch yourself.

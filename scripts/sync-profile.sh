@@ -53,6 +53,8 @@ cp -p "$REPO_ROOT/base.md" "$WORK_DIR/base.md" \
   || fail "could not stage $REPO_ROOT/base.md"
 cp -p "$REPO_ROOT/main.md" "$WORK_DIR/main.md" \
   || fail "could not stage $REPO_ROOT/main.md"
+cp -p "$REPO_ROOT/scripts/claude-collab.sh" "$WORK_DIR/claude-collab.sh" \
+  || fail "could not stage $REPO_ROOT/scripts/claude-collab.sh"
 
 awk 'BEGIN { print "developer_instructions = \"\"\"" }
      { print }
@@ -339,10 +341,12 @@ mv -f "$WORK_DIR/base.md" "$DEST/base.md" \
   || fail "could not atomically install $DEST/base.md"
 mv -f "$WORK_DIR/main.md" "$DEST/main.md" \
   || fail "could not atomically install $DEST/main.md"
+mv -f "$WORK_DIR/claude-collab.sh" "$DEST/claude-collab.sh" \
+  || fail "could not atomically install $DEST/claude-collab.sh"
 mv -f "$PROFILE_TMP" "$PROFILE_FILE" \
   || fail "could not atomically install $PROFILE_FILE"
 PROFILE_TMP=""
 
-print "$SCRIPT_NAME: synced $DEST/base.md and $DEST/main.md"
+print "$SCRIPT_NAME: synced $DEST/base.md, $DEST/main.md, and $DEST/claude-collab.sh"
 print "$SCRIPT_NAME: updated developer_instructions, tool_namespace, root_agent_usage_hint_text, multi_agent_mode_hint_text, subagent_developer_instructions, and subagent_usage_hint_text in $PROFILE_FILE"
 print "$SCRIPT_NAME: profile backup: $BACKUP"

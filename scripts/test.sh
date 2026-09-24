@@ -10,6 +10,7 @@ RUN_CARGO=0
 
 "$REPO_ROOT/scripts/check-state.sh" --local --allow-public-dirty --repair-mechanical-lock
 git -C "$REPO_ROOT" diff --check
+"$REPO_ROOT/scripts/test-claude-collab.sh"
 
 MANIFEST="$REPO_ROOT/.boss/workspace.local.toml"
 manifest_value() {

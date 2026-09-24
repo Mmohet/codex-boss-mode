@@ -239,6 +239,18 @@ for artifact in base.md main.md SOURCES.md; do
     [[ "$live_sha" == "$tracked_sha" ]] && ok "live $artifact matches public artifact ($tracked_sha)" || drift "live $artifact differs from public artifact"
   fi
 done
+LIVE_CLAUDE_HELPER="$LIVE_BOSS_DIR/claude-collab.sh"
+TRACKED_CLAUDE_HELPER="$PUBLIC_REPO/scripts/claude-collab.sh"
+check_file "live Claude collaboration helper" "$LIVE_CLAUDE_HELPER"
+if [[ -f "$LIVE_CLAUDE_HELPER" && -f "$TRACKED_CLAUDE_HELPER" ]]; then
+  live_sha="$(sha256_file "$LIVE_CLAUDE_HELPER")"
+  tracked_sha="$(sha256_file "$TRACKED_CLAUDE_HELPER")"
+  [[ "$live_sha" == "$tracked_sha" ]] \
+    && ok "live Claude collaboration helper matches public source ($tracked_sha)" \
+    || drift "live Claude collaboration helper differs from public source"
+  [[ -x "$LIVE_CLAUDE_HELPER" ]] && ok "live Claude collaboration helper is executable" \
+    || drift "live Claude collaboration helper is not executable"
+fi
 
 if [[ -f "$PUBLIC_REPO/boss.config.example.toml" && -f "$PUBLIC_REPO/main.md" ]]; then
   template_role_sha="$(template_role_hash)"
@@ -293,7 +305,7 @@ expected_host="$DESKTOP_APP/Contents/Resources/codex-code-mode-host"
 
 print ""
 note "build and update scripts"
-for script in scripts/common.sh scripts/build.sh scripts/update.sh scripts/install-config.sh scripts/check-state.sh scripts/test.sh scripts/prompt-diff.sh bin/codex-boss bin/codex-normal; do
+for script in scripts/common.sh scripts/build.sh scripts/update.sh scripts/install-config.sh scripts/sync-profile.sh scripts/check-state.sh scripts/test.sh scripts/test-claude-collab.sh scripts/claude-collab.sh scripts/prompt-diff.sh bin/codex-boss bin/codex-normal; do
   script_path="$PUBLIC_REPO/$script"
   if [[ -f "$script_path" ]]; then
     if zsh -n "$script_path" >/dev/null 2>&1; then ok "$script parses"; else drift "$script has shell syntax errors"; fi
