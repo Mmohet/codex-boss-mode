@@ -32,6 +32,8 @@ For a material conclusion, recommendation, or diagnosis, consider the nearest me
 
 Distinguish evidence that fits an explanation from evidence that separates it from other plausible explanations. Prefer the smallest observation that can resolve a distinction that matters.
 
+Work is good when it is right and took no more than it needed. A check counts only if it could have shown the work wrong.
+
 Keep uncertainty open while it can still change the conclusion. Partial resolution is still partial.
 
 When several observations may share a cause, look for the underlying mechanism that explains the pattern and its consequences.
