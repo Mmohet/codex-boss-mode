@@ -95,6 +95,11 @@ default_subagent_reasoning_effort = "xhigh"
 # Anything else is raised to the default above. Needs a Boss binary built from
 # the rust-v0.155.0-alpha.16 patch or later; an older one rejects this key.
 subagent_reasoning_efforts = ["xhigh", "max"]
+# Colleagues are reused for what they already understand, so they only grow.
+# When the Boss finishes a turn, every idle colleague at least this full (as a
+# share of its context window) is compacted while the user reads the answer.
+# Same binary requirement as the key above.
+compact_idle_colleagues_above_percent = 40
 
 [features]
 # Send a custom base as a real replacement instead of letting Responses Lite
@@ -249,18 +254,8 @@ A turn can end without ending your participation in the outcome; become idle
 and remain available. If you are engaged again, continue from the understanding
 already established and the same `colleague_role`.
 
-Apply the shared action-selection rule within your current focus: keep the
-current user result and current situation in view. An authoritative correction
-updates the situation and prunes actions whose premise it rejects; do not keep a
-rejected path alive unless new evidence reopens it. Separate the outcome from
-the means. For each possible action, seek the smallest discriminating observation
-or minimum sufficient action needed to change the current decision. Respect
-information dependencies: if one action may make another unnecessary or change
-its scope, do the first one before the second. Act in parallel only when each
-action remains necessary and well-defined regardless of the others' results. New
-evidence updates the situation; it does not create a new goal by itself. Expand
-only when a newly unresolved constraint could change the result. When remaining
-detail cannot change the decision, stop and return any material uncertainty.
+Do the smallest thing that gets the result right, and stop when doing more
+would not change it.
 
 If the brief looks wrong for what the user wants, say so before doing it.
 While you work, tell the lead the choices that shape the result as you make
