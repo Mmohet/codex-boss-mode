@@ -1403,6 +1403,21 @@ index 06f1bc71..b0d44716 100644
              CoreCollabAgentTool::ListAgents => Self::ListAgents,
          }
      }
+diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
+index d5572f3c..770cada3 100644
+--- a/codex-rs/config/src/config_toml.rs
++++ b/codex-rs/config/src/config_toml.rs
+@@ -701,6 +701,10 @@ pub struct AgentsToml {
+     pub default_subagent_model: Option<String>,
+     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
+     pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
++    /// The only reasoning efforts a spawned subagent may run at. A level outside
++    /// the list, whoever asks for it, becomes the default above when that is
++    /// listed, otherwise the first listed level. Unset allows any level.
++    pub subagent_reasoning_efforts: Option<Vec<ReasoningEffort>>,
+     /// Removed agent-job setting retained as a no-op for compatibility.
+     #[schemars(skip)]
+     pub job_max_runtime_seconds: Option<u64>,
 diff --git a/codex-rs/config/src/loader/mod.rs b/codex-rs/config/src/loader/mod.rs
 index d375e988..d08a4a06 100644
 --- a/codex-rs/config/src/loader/mod.rs
@@ -1473,10 +1488,24 @@ index 57b5daff..df4ad11e 100644
  
  #[derive(Debug, Clone, PartialEq)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index e53a95e2..84f67f4f 100644
+index e53a95e2..8acd3882 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -688,6 +688,18 @@
+@@ -66,6 +66,13 @@
+           "description": "Maximum nesting depth for V1 agent threads. Ignored by V2.",
+           "format": "int32",
+           "type": "integer"
++        },
++        "subagent_reasoning_efforts": {
++          "description": "The only reasoning efforts a spawned subagent may run at. A level outside the list, whoever asks for it, becomes the default above when that is listed, otherwise the first listed level. Unset allows any level.",
++          "items": {
++            "$ref": "#/definitions/ReasoningEffort"
++          },
++          "type": "array"
+         }
+       },
+       "type": "object"
+@@ -688,6 +695,21 @@
              "bedrock_setup_wizard": {
                "type": "boolean"
              },
@@ -1489,13 +1518,16 @@ index e53a95e2..84f67f4f 100644
 +            "boss_hybrid_subagent_base": {
 +              "type": "boolean"
 +            },
++            "boss_main_decision_layer": {
++              "type": "boolean"
++            },
 +            "boss_profile_role_survives_host": {
 +              "type": "boolean"
 +            },
              "browser_use": {
                "type": "boolean"
              },
-@@ -6342,6 +6354,18 @@
+@@ -6342,6 +6364,21 @@
          "bedrock_setup_wizard": {
            "type": "boolean"
          },
@@ -1508,6 +1540,9 @@ index e53a95e2..84f67f4f 100644
 +        "boss_hybrid_subagent_base": {
 +          "type": "boolean"
 +        },
++        "boss_main_decision_layer": {
++          "type": "boolean"
++        },
 +        "boss_profile_role_survives_host": {
 +          "type": "boolean"
 +        },
@@ -1515,7 +1550,7 @@ index e53a95e2..84f67f4f 100644
            "type": "boolean"
          },
 diff --git a/codex-rs/core/src/agent/child_config.rs b/codex-rs/core/src/agent/child_config.rs
-index ca2f7d91..9ff6fce1 100644
+index ca2f7d91..7ebdbebc 100644
 --- a/codex-rs/core/src/agent/child_config.rs
 +++ b/codex-rs/core/src/agent/child_config.rs
 @@ -8,10 +8,13 @@ use crate::agent::role::apply_role_to_config;
@@ -1607,6 +1642,17 @@ index ca2f7d91..9ff6fce1 100644
          .map_err(|err| format!("permission_profile is invalid: {err}"))?;
      Ok(())
  }
+@@ -203,7 +237,9 @@ async fn apply_requested_spawn_agent_model_overrides(
+     let turn = step_context.turn.as_ref();
+     let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
+     let requested_reasoning_effort = requested_reasoning_effort
+-        .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());
++        .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone())
++        .or_else(|| turn.config.agent_subagent_reasoning_efforts.first().cloned())
++        .map(|effort| turn.config.allowed_subagent_reasoning_effort(effort));
+     if requested_model.is_none() && requested_reasoning_effort.is_none() {
+         return Ok(());
+     }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
 index 33bd450b..3367f942 100644
 --- a/codex-rs/core/src/agent/control.rs
@@ -2133,7 +2179,7 @@ index 00000000..a443ce57
 +    }
 +}
 diff --git a/codex-rs/core/src/agent/control/delivery.rs b/codex-rs/core/src/agent/control/delivery.rs
-index 034fa0ad..83dae9df 100644
+index 034fa0ad..7a73b139 100644
 --- a/codex-rs/core/src/agent/control/delivery.rs
 +++ b/codex-rs/core/src/agent/control/delivery.rs
 @@ -1,6 +1,6 @@
@@ -2220,13 +2266,14 @@ index 034fa0ad..83dae9df 100644
      ) -> Result<AgentPath, MessageDeliveryError> {
          let receiver_agent = self
              .ensure_agent_known(target)
-@@ -105,13 +134,27 @@ impl AgentControl {
+@@ -105,13 +134,28 @@ impl AgentControl {
          self.ensure_v2_agent_loaded(resume_config, target, /*parent*/ None)
              .await
              .map_err(MessageDeliveryError::Agent)?;
 +        // Retune before the message lands so the step that reads it already
 +        // runs at the new level, whether it starts a turn or joins one.
 +        if let Some(effort) = effort {
++            let effort = turn.config.allowed_subagent_reasoning_effort(effort);
 +            let thread = self
 +                .upgrade()
 +                .map_err(MessageDeliveryError::Agent)?
@@ -2487,10 +2534,114 @@ index 9b3c7a2d..125f1051 100644
          &action,
          step_context.settings.approval_policy(),
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 7be3235f..93b21aa8 100644
+index 7be3235f..9a42ff5c 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -11836,7 +11836,7 @@ max_concurrent_threads_per_session = 17
+@@ -8406,6 +8406,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
+             max_depth: None,
+             default_subagent_model: None,
+             default_subagent_reasoning_effort: None,
++            subagent_reasoning_efforts: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
+             roles: BTreeMap::from([(
+@@ -9348,6 +9349,55 @@ job_max_runtime_seconds = 900
+     );
+ }
+ 
++#[tokio::test]
++async fn subagent_efforts_keep_listed_levels_and_replace_the_rest() -> std::io::Result<()> {
++    let codex_home = TempDir::new()?;
++    let load = |default, allowed| {
++        let cfg = ConfigToml {
++            agents: Some(AgentsToml {
++                default_subagent_reasoning_effort: default,
++                subagent_reasoning_efforts: allowed,
++                ..Default::default()
++            }),
++            ..Default::default()
++        };
++        Config::load_from_base_config_with_overrides(
++            cfg,
++            ConfigOverrides::default(),
++            codex_home.abs(),
++        )
++    };
++    let listed = Some(vec![ReasoningEffort::XHigh, ReasoningEffort::Max]);
++
++    let config = load(Some(ReasoningEffort::XHigh), listed.clone()).await?;
++    assert_eq!(
++        [
++            ReasoningEffort::Low,
++            ReasoningEffort::Max,
++            ReasoningEffort::Ultra,
++        ]
++        .map(|requested| config.allowed_subagent_reasoning_effort(requested)),
++        [
++            ReasoningEffort::XHigh,
++            ReasoningEffort::Max,
++            ReasoningEffort::XHigh,
++        ]
++    );
++
++    let default_outside_list = load(Some(ReasoningEffort::High), listed).await?;
++    assert_eq!(
++        default_outside_list.allowed_subagent_reasoning_effort(ReasoningEffort::Low),
++        ReasoningEffort::XHigh
++    );
++
++    let unlisted = load(Some(ReasoningEffort::High), None).await?;
++    assert_eq!(
++        unlisted.allowed_subagent_reasoning_effort(ReasoningEffort::Low),
++        ReasoningEffort::Low
++    );
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+     let codex_home = TempDir::new()?;
+@@ -9357,6 +9407,7 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+             max_depth: Some(2),
+             default_subagent_model: Some("gpt-5.6-terra".to_string()),
+             default_subagent_reasoning_effort: Some(ReasoningEffort::High),
++            subagent_reasoning_efforts: None,
+             interrupt_message: Some(false),
+             ..Default::default()
+         }),
+@@ -9421,6 +9472,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
+             max_depth: None,
+             default_subagent_model: None,
+             default_subagent_reasoning_effort: None,
++            subagent_reasoning_efforts: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
+             roles: BTreeMap::from([(
+@@ -9467,6 +9519,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
+             max_depth: None,
+             default_subagent_model: None,
+             default_subagent_reasoning_effort: None,
++            subagent_reasoning_efforts: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
+             roles: BTreeMap::from([(
+@@ -9507,6 +9560,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
+             max_depth: None,
+             default_subagent_model: None,
+             default_subagent_reasoning_effort: None,
++            subagent_reasoning_efforts: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
+             roles: BTreeMap::from([(
+@@ -9547,6 +9601,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
+             max_depth: None,
+             default_subagent_model: None,
+             default_subagent_reasoning_effort: None,
++            subagent_reasoning_efforts: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
+             roles: BTreeMap::from([(
+@@ -11836,7 +11891,7 @@ max_concurrent_threads_per_session = 17
      .expect("multi-agent v2 config should parse");
  
      let config = resolve_multi_agent_v2_config(&config_toml);
@@ -2499,7 +2650,7 @@ index 7be3235f..93b21aa8 100644
      let messages = ResolvedModelMessages::bundled().multi_agent();
      assert!(config.wait_agent_enabled);
      for wait_agent_enabled in [true, false] {
-@@ -11849,7 +11849,7 @@ max_concurrent_threads_per_session = 17
+@@ -11849,7 +11904,7 @@ max_concurrent_threads_per_session = 17
              let hint = hint.expect("default usage hints should be present").body();
              assert!(hint.contains(concurrency_guidance));
              assert_eq!(
@@ -2508,7 +2659,7 @@ index 7be3235f..93b21aa8 100644
                  wait_agent_enabled
              );
          }
-@@ -11938,9 +11938,8 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+@@ -11938,9 +11993,8 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
              .strip_prefix(hint_without_model_overrides.as_str())
              .expect("model-override guidance should extend the base usage hint");
          for required_fragment in [
@@ -2519,7 +2670,7 @@ index 7be3235f..93b21aa8 100644
              "`reasoning_effort`",
          ] {
              assert!(
-@@ -13113,3 +13112,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
+@@ -13113,3 +13167,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
  
      Ok(())
  }
@@ -2623,7 +2774,7 @@ index 7be3235f..93b21aa8 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 2c17d687..d9ce6593 100644
+index 2c17d687..4a953606 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -646,6 +646,16 @@ pub struct Config {
@@ -2643,7 +2794,42 @@ index 2c17d687..d9ce6593 100644
      /// Whether config explicitly selected named permissions profiles instead
      /// of the legacy `sandbox_mode` syntax.
      pub explicit_permission_profile_mode: bool,
-@@ -1627,6 +1637,7 @@ impl Config {
+@@ -898,6 +908,9 @@ pub struct Config {
+     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
+     pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
+ 
++    /// The only reasoning efforts a spawned subagent may run at; empty allows any.
++    pub agent_subagent_reasoning_efforts: Vec<ReasoningEffort>,
++
+     /// Whether to record a model-visible message when an agent turn is interrupted.
+     pub agent_interrupt_message_enabled: bool,
+ 
+@@ -1524,6 +1537,24 @@ impl Config {
+         &self.sqlite
+     }
+ 
++    /// The effort a spawned agent actually runs at when `requested` is asked
++    /// for, by its parent or by itself: `requested` when the configured list
++    /// allows it or there is no list, otherwise the configured default when the
++    /// list holds it, otherwise the first listed level.
++    pub(crate) fn allowed_subagent_reasoning_effort(
++        &self,
++        requested: ReasoningEffort,
++    ) -> ReasoningEffort {
++        let allowed = &self.agent_subagent_reasoning_efforts;
++        if allowed.is_empty() || allowed.contains(&requested) {
++            return requested;
++        }
++        self.agent_default_subagent_reasoning_effort
++            .clone()
++            .filter(|default| allowed.contains(default))
++            .unwrap_or_else(|| allowed[0].clone())
++    }
++
+     /// Resolves the configured, reviewer-catalog, or bundled Guardian policy.
+     pub fn resolve_guardian_policy<'a>(
+         &'a self,
+@@ -1627,6 +1658,7 @@ impl Config {
                      Some(BaseInstructionsProvenance::Model { .. })
                  )
              }),
@@ -2651,7 +2837,19 @@ index 2c17d687..d9ce6593 100644
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
          }
-@@ -3902,7 +3913,29 @@ impl Config {
+@@ -3799,6 +3831,11 @@ impl Config {
+             .agents
+             .as_ref()
+             .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
++        let agent_subagent_reasoning_efforts = cfg
++            .agents
++            .as_ref()
++            .and_then(|agents| agents.subagent_reasoning_efforts.clone())
++            .unwrap_or_default();
+         let agent_interrupt_message_enabled = cfg
+             .agents
+             .as_ref()
+@@ -3902,7 +3939,29 @@ impl Config {
          let base_instructions_provenance = base_instructions
              .as_ref()
              .map(|_| BaseInstructionsProvenance::Custom);
@@ -2682,7 +2880,7 @@ index 2c17d687..d9ce6593 100644
          let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
          let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
          let include_collaboration_mode_instructions =
-@@ -4179,6 +4212,8 @@ impl Config {
+@@ -4179,6 +4238,8 @@ impl Config {
                  windows_sandbox_type,
                  windows_sandbox_private_desktop,
              },
@@ -2691,6 +2889,14 @@ index 2c17d687..d9ce6593 100644
              explicit_permission_profile_mode,
              custom_permission_profiles,
              approvals_reviewer: constrained_approvals_reviewer.value(),
+@@ -4241,6 +4302,7 @@ impl Config {
+             agent_max_threads,
+             agent_default_subagent_model,
+             agent_default_subagent_reasoning_effort,
++            agent_subagent_reasoning_efforts,
+             agent_max_depth,
+             agent_roles,
+             max_goal_token_budget: cfg
 diff --git a/codex-rs/core/src/context/connector_inventory.rs b/codex-rs/core/src/context/connector_inventory.rs
 new file mode 100644
 index 00000000..c068aaea
@@ -5755,10 +5961,10 @@ index 00000000..484dd01c
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs
 new file mode 100644
-index 00000000..313b0903
+index 00000000..8b0ba5c8
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/effort.rs
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,195 @@
 +//! Reasoning-effort tools: the parent's `set_agent_effort` and a colleague's
 +//! own `set_reasoning_effort`.
 +//!
@@ -5822,6 +6028,7 @@ index 00000000..313b0903
 +    let args: SetAgentEffortArgs = parse_arguments(&arguments)?;
 +    let agent_id = resolve_agent_target(&session, &turn, &args.target).await?;
 +    analytics.set_receiver(agent_id);
++    let effort = turn.config.allowed_subagent_reasoning_effort(args.reasoning_effort);
 +    let AgentEffortOutcome {
 +        agent_path,
 +        previous_effort,
@@ -5829,7 +6036,7 @@ index 00000000..313b0903
 +    } = session
 +        .services
 +        .agent_control
-+        .set_spawned_agent_effort(session.thread_id, agent_id, args.reasoning_effort)
++        .set_spawned_agent_effort(session.thread_id, agent_id, effort.clone())
 +        .await
 +        .map_err(|err| match err {
 +            AgentEffortError::InvalidRequest(message) => FunctionCallError::RespondToModel(message),
@@ -5846,7 +6053,7 @@ index 00000000..313b0903
 +        },
 +    )
 +    .await;
-+    Ok(EffortResult::new(previous_effort, running_turn))
++    Ok(EffortResult::new(previous_effort, effort, running_turn))
 +}
 +
 +pub(crate) struct SetReasoningEffortHandler;
@@ -5868,14 +6075,19 @@ index 00000000..313b0903
 +            let arguments = function_arguments(invocation.payload.clone())?;
 +            let args: SetReasoningEffortArgs = parse_arguments(&arguments)?;
 +            let previous_effort = invocation.turn.current_reasoning_effort();
++            let effort = invocation
++                .turn
++                .config
++                .allowed_subagent_reasoning_effort(args.reasoning_effort);
 +            // Only the rest of this turn: the level the parent chose is where the
 +            // next turn starts, so a raise for one hard spot does not stick.
 +            let running_turn = invocation
 +                .session
-+                .retune_effort(args.reasoning_effort, /*future_turns*/ false)
++                .retune_effort(effort.clone(), /*future_turns*/ false)
 +                .await;
 +            Ok(boxed_tool_output(EffortResult::new(
 +                previous_effort,
++                effort,
 +                running_turn,
 +            )))
 +        })
@@ -5905,12 +6117,19 @@ index 00000000..313b0903
 +pub(crate) struct EffortResult {
 +    #[serde(skip_serializing_if = "Option::is_none")]
 +    previous_effort: Option<ReasoningEffort>,
++    /// The level set, which differs from the one asked for when the configured
++    /// subagent efforts do not include that one.
++    effort: ReasoningEffort,
 +    /// `applied`, `no_turn_running`, or the reason the running turn refused.
 +    running_turn: String,
 +}
 +
 +impl EffortResult {
-+    fn new(previous_effort: Option<ReasoningEffort>, running_turn: TurnSettingsUpdateOutcome) -> Self {
++    fn new(
++        previous_effort: Option<ReasoningEffort>,
++        effort: ReasoningEffort,
++        running_turn: TurnSettingsUpdateOutcome,
++    ) -> Self {
 +        let running_turn = match running_turn {
 +            TurnSettingsUpdateOutcome::Applied => "applied".to_string(),
 +            TurnSettingsUpdateOutcome::TargetUnavailable => "no_turn_running".to_string(),
@@ -5918,6 +6137,7 @@ index 00000000..313b0903
 +        };
 +        Self {
 +            previous_effort,
++            effort,
 +            running_turn,
 +        }
 +    }
@@ -8203,10 +8423,43 @@ index 4b429a96..f7abe872 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 2139d758..5a5ec727 100644
+index 2139d758..58733b5e 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
-@@ -2325,14 +2325,14 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
+@@ -1984,6 +1984,32 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
+     Ok(())
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn spawn_agent_raises_an_effort_outside_the_configured_subagent_efforts() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let server = start_mock_server().await;
++    let child_snapshot = spawn_child_and_capture_snapshot(
++        &server,
++        json!({
++            "message": CHILD_PROMPT,
++            "model": REQUESTED_MODEL,
++            "reasoning_effort": REQUESTED_REASONING_EFFORT,
++        }),
++        |builder| {
++            builder.with_config(|config| {
++                config.agent_default_subagent_reasoning_effort = Some(ReasoningEffort::XHigh);
++                config.agent_subagent_reasoning_efforts =
++                    vec![ReasoningEffort::XHigh, ReasoningEffort::Max];
++            })
++        },
++    )
++    .await?;
++
++    assert_eq!(child_snapshot.reasoning_effort, Some(ReasoningEffort::XHigh));
++    Ok(())
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn spawn_agent_uses_configured_subagent_defaults() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+@@ -2325,14 +2351,14 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
          vec![json!({
              "type": "input_text",
              "text": format!(
@@ -8223,7 +8476,7 @@ index 2139d758..5a5ec727 100644
              }),
              json!({
                  "type": "encrypted_content",
-@@ -2527,7 +2527,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
+@@ -2527,7 +2553,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
          ),
      };
      let notification = format!(
@@ -8697,6 +8950,18 @@ index f5a4648f..b17cbd3d 100644
                  },
                  {"type": "encrypted_content", "encrypted_content": "review this"}
              ]
+diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
+index ca0a84bf..37d3721f 100644
+--- a/codex-rs/thread-manager-sample/src/main.rs
++++ b/codex-rs/thread-manager-sample/src/main.rs
+@@ -264,6 +264,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+         agent_max_threads: Some(6),
+         agent_default_subagent_model: None,
+         agent_default_subagent_reasoning_effort: None,
++        agent_subagent_reasoning_efforts: Vec::new(),
+         agent_interrupt_message_enabled: false,
+         agent_max_depth: 1,
+         agent_roles: BTreeMap::new(),
 diff --git a/codex-rs/tui/src/app/agent_status_feed.rs b/codex-rs/tui/src/app/agent_status_feed.rs
 index 1039b043..b0738f52 100644
 --- a/codex-rs/tui/src/app/agent_status_feed.rs

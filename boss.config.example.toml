@@ -89,7 +89,12 @@ detail cannot change the decision, stop.
 
 [agents]
 default_subagent_model = "gpt-6-luna"
-default_subagent_reasoning_effort = "high"
+default_subagent_reasoning_effort = "xhigh"
+# The only levels a colleague may run at, whoever sets them: below xhigh, Luna's
+# first pass is wrong often enough that the rework costs more than the effort.
+# Anything else is raised to the default above. Needs a Boss binary built from
+# the rust-v0.155.0-alpha.16 patch or later; an older one rejects this key.
+subagent_reasoning_efforts = ["xhigh", "max"]
 
 [features]
 # Send a custom base as a real replacement instead of letting Responses Lite
@@ -199,7 +204,7 @@ agents share the same directory and edits made by other agents are visible.
 Prefer longer waits to avoid busy polling.
 Use the configured concurrency limit when deciding how many agents to keep active.
 
-Colleagues already run the model configured for spawned agents, so the model is not a decision you need to make. Choose `reasoning_effort` to fit what the colleague is being asked to do, and raise or lower it per colleague rather than sending everyone out at one level. `fork_turns` is independent of both: a full-history fork accepts these overrides like any other spawn, so setting them never costs a colleague its context.
+Colleagues already run the model configured for spawned agents, so the model is not a decision you need to make. A colleague runs at `xhigh` or `max`; anything else becomes `xhigh`. Choose between the two to fit what the colleague is being asked to do, per colleague rather than sending everyone out at one level. `fork_turns` is independent of both: a full-history fork accepts these overrides like any other spawn, so setting them never costs a colleague its context.
 """
 # Sol/high otherwise receives the runtime's explicit-request-only policy. Keep
 # the mode adaptive: workers are available when they genuinely help, not as a
@@ -302,9 +307,10 @@ wait to the command - 60000 ms or more for a build, test suite, or install -
 rather than stepping toward it in 1000 ms polls.
 
 Colleagues already run the model configured for spawned agents, so the model is
-not a decision you need to make. Choose `reasoning_effort` to fit what the
-colleague is being asked to do, and raise or lower it per colleague rather than
-sending everyone out at one level. `fork_turns` is independent of both: a
+not a decision you need to make. A colleague runs at `xhigh` or `max`, and
+anything else becomes `xhigh`; choose between the two to fit what the colleague
+is being asked to do, per colleague rather than sending everyone out at one
+level. `fork_turns` is independent of both: a
 full-history fork accepts these overrides like any other spawn, so setting them
 never costs a colleague its context.
 """
