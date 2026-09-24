@@ -2962,7 +2962,7 @@ index 00000000..c068aaea
 +    }
 +}
 diff --git a/codex-rs/core/src/context/inter_agent_completion_message.rs b/codex-rs/core/src/context/inter_agent_completion_message.rs
-index ec04c4f1..26f5f8ba 100644
+index ec04c4f1..96c2735f 100644
 --- a/codex-rs/core/src/context/inter_agent_completion_message.rs
 +++ b/codex-rs/core/src/context/inter_agent_completion_message.rs
 @@ -39,7 +39,7 @@ impl ContextualUserFragment for InterAgentCompletionMessage {
@@ -2970,7 +2970,7 @@ index ec04c4f1..26f5f8ba 100644
      fn body(&self) -> String {
          format!(
 -            "Message Type: FINAL_ANSWER\nTask name: {}\nSender: {}\nPayload:\n{}",
-+            "Message Type: FINAL_ANSWER\nColleague: {}\nSender: {}\nTurn state: idle; colleague remains available.\nPayload:\n{}",
++            "Message Type: FINAL_ANSWER\nColleague: {}\nSender: {}\nTurn state: idle; colleague remains available.\nThis is the colleague's report; the user will see only the result.\nPayload:\n{}",
              self.task_name, self.sender, self.payload,
          )
      }
@@ -4843,7 +4843,7 @@ index d5fccaa5..5af43e28 100644
 +    }
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_common.rs b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
-index 715a02be..8cc9ea69 100644
+index 715a02be..0f70abf3 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_common.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
 @@ -145,3 +145,45 @@ pub(crate) fn parse_collab_input(
@@ -4872,7 +4872,7 @@ index 715a02be..8cc9ea69 100644
 +        "Join the shared situation as a colleague.\n\n\
 +         Shared context (current result, situation, constraints, and uncertainties):\n{shared_context}\n\n\
 +         Current focus (where attention is useful now and may change):\n{current_focus}\n\n\
-+         Keep the shared outcome in view. This focus is not a sealed assignment.\n\
++         Tell the lead the choices that shape the result as you make them.\n\
 +         When this turn ends, remain available to continue the shared situation.",
 +    ))
 +}
@@ -4887,13 +4887,13 @@ index 715a02be..8cc9ea69 100644
 +    format!(
 +        "Join the shared situation as a colleague.\n\n\
 +         Current focus (where attention is useful now and may change):\n{current_focus}\n\n\
-+         Keep the shared outcome in view. This focus is not a sealed assignment.\n\
++         Tell the lead the choices that shape the result as you make them.\n\
 +         The encrypted content below is the shared situation. When this turn ends, remain \
 +         available to continue it.",
 +    )
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
-index 43611618..bbdf111c 100644
+index 43611618..2ca291d1 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 @@ -91,7 +91,15 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
@@ -5210,7 +5210,7 @@ index 43611618..bbdf111c 100644
 +        (
 +            "shared_context".to_string(),
 +            JsonSchema::string(Some(
-+                "The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. This is context for participation, not a sealed assignment. Plain text."
++                "The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. It is there so the colleague understands why the focus matters. Plain text."
 +                    .to_string(),
 +            )),
 +        ),
@@ -5240,7 +5240,7 @@ index 43611618..bbdf111c 100644
 +        (
 +            "shared_context".to_string(),
 +            JsonSchema::string(Some(
-+                "The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. This is context for participation, not a sealed assignment. Plain text."
++                "The shared situation this colleague joins: current result, situation, constraints, authority, uncertainties, and the perspective you hold. It is there so the colleague understands why the focus matters. Plain text."
 +                    .to_string(),
              ))
              .with_encrypted(),
@@ -5502,7 +5502,7 @@ index 888a1137..093e0e00 100644
              "pending_init",
              "running",
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 86d80ee7..d4b14f83 100644
+index 86d80ee7..962233fb 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -216,6 +216,7 @@ struct ListAgentsResult {
@@ -5575,7 +5575,7 @@ index 86d80ee7..d4b14f83 100644
 +    assert!(message.contains("The user needs the current situation resolved."));
 +    assert!(message.contains("Current focus (where attention is useful now and may change):"));
 +    assert!(message.contains("Help distinguish the next decision-changing observation."));
-+    assert!(message.contains("This focus is not a sealed assignment."));
++    assert!(message.contains("Tell the lead the choices that shape the result as you make them."));
 +    assert!(message.contains("remain available to continue the shared situation"));
 +}
 +
@@ -8423,7 +8423,7 @@ index 4b429a96..f7abe872 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 2139d758..58733b5e 100644
+index 2139d758..132b56a0 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
 @@ -1984,6 +1984,32 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
@@ -8481,7 +8481,7 @@ index 2139d758..58733b5e 100644
      };
      let notification = format!(
 -        "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n{payload}"
-+        "Message Type: FINAL_ANSWER\nColleague: /root\nSender: /root/worker\nTurn state: idle; colleague remains available.\nPayload:\n{payload}"
++        "Message Type: FINAL_ANSWER\nColleague: /root\nSender: /root/worker\nTurn state: idle; colleague remains available.\nThis is the colleague's report; the user will see only the result.\nPayload:\n{payload}"
      );
      // If the child is still running when the parent turn starts, wait_agent blocks
      // until mailbox delivery. The follow-up request must then contain that delivery.

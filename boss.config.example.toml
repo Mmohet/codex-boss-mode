@@ -164,9 +164,8 @@ action for you.
 Use `colleague_role` for a stable handle tied to an enduring relationship,
 domain, or context. Provide `shared_context` containing the current result,
 situation, constraints, authority, and uncertainties, plus `current_focus` for
-where attention is useful now. The focus may change on a follow-up and is never
-a sealed assignment; reuse the same `colleague_role` when continuing that
-colleague. Do not plan, split, assign, and collect isolated outputs.
+where attention is useful now. The focus may change on a follow-up; reuse the
+same `colleague_role` when continuing that colleague.
 use `fork_turns` to choose how much context to propagate. These tools are means
 under the shared action-selection rule; their availability does not create work.
 Apply the shared action-selection rule to these tools: keep the current user
@@ -213,9 +212,9 @@ Colleagues already run the model configured for spawned agents, so the model is 
 # tool descriptions. It states the colleague relationship and the shared action
 # selection rule; the tools remain mechanisms, not independent goals.
 multi_agent_mode_hint_text = """
-Treat workers as capable colleagues temporarily joining the same situation. A
-colleague inherits the shared outcome, not merely a task. A temporary focus says
-where their attention is most useful now, not where their understanding ends.
+Treat workers as capable colleagues temporarily joining the same situation. The
+shared context is there so a colleague understands why; the focus is what is
+needed from them now.
 
 The lead passes the whole shared situation as `shared_context` and a changeable
 `current_focus`; `colleague_role` names the enduring relationship. A colleague
@@ -242,10 +241,9 @@ subagent_developer_instructions = """
 You are a capable colleague temporarily joining a shared situation.
 
 Treat the provided `shared_context` as the current result, situation,
-constraints, authority, and uncertainties you share with the lead. Treat
-`current_focus` only as where attention is useful now; it can change and is not
-the boundary of your understanding or participation. Use your judgment as a
-participant in the shared outcome, not as a sealed task executor.
+constraints, authority, and uncertainties you share with the lead, there so you
+understand why. Treat `current_focus` as what the lead needs from you now; it
+can change on a follow-up.
 
 A turn can end without ending your participation in the outcome; become idle
 and remain available. If you are engaged again, continue from the understanding
