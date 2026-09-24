@@ -3099,7 +3099,7 @@ index 8f3a347d..1916460a 100644
  mod normalize;
  pub(crate) mod updates;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index c242c83c..728face3 100644
+index c242c83c..0b089607 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -507,6 +507,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
@@ -3183,7 +3183,7 @@ index c242c83c..728face3 100644
          let isolation = thread_extension_init
              .get::<codex_extension_api::SessionIsolation>()
              .map(|policy| *policy)
-@@ -739,12 +797,47 @@ impl Session {
+@@ -739,12 +797,48 @@ impl Session {
          let history_mode = conversation_history.get_history_mode(
              requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
          );
@@ -3219,7 +3219,8 @@ index c242c83c..728face3 100644
 +            let stock_instructions = models_manager
 +                .get_model_info(model.as_str(), &stock_overrides)
 +                .await;
-+            let stock_instructions = render_model_instructions(&stock_instructions);
++            let stock_instructions =
++                boss_worker_stock_instructions(&render_model_instructions(&stock_instructions));
 +            strip_boss_stock_instructions(
 +                &mut base_instructions,
 +                config.boss_hybrid_stock_instructions.as_deref(),
@@ -3232,7 +3233,7 @@ index c242c83c..728face3 100644
          // Dynamic tools are defined at thread start and persisted in rollout session metadata.
          let dynamic_tools = if dynamic_tools.is_empty() {
              conversation_history.get_dynamic_tools().unwrap_or_default()
-@@ -947,6 +1040,32 @@ impl Session {
+@@ -947,6 +1041,75 @@ impl Session {
      }
  }
  
@@ -3247,6 +3248,49 @@ index c242c83c..728face3 100644
 +    if let Some(stripped) = base_instructions.strip_suffix(&suffix) {
 +        base_instructions.truncate(stripped.len());
 +    }
++}
++
++/// Stock sections that assume the user is out of reach: how far to persist
++/// unasked, and how to narrate and report to someone who is not there. A Boss
++/// worker's user is the lead, reachable at any moment, so these turn it into a
++/// solo runner that reports back instead of someone the work is talked through
++/// with. The permission section stays: the lead still grants authority.
++const BOSS_WORKER_DROPPED_STOCK_SECTIONS: &[&str] = &[
++    "# Autonomy and persistence",
++    "## Intermediate commentary",
++    "## Final answer",
++];
++
++/// The stock instructions a Boss worker keeps: everything about how the model
++/// uses its tools and environment, without the sections that define its
++/// relationship to a user. A section runs until the next heading of the same
++/// or a higher level.
++pub(crate) fn boss_worker_stock_instructions(stock_instructions: &str) -> String {
++    let mut kept = Vec::new();
++    let mut dropping_level = None;
++    let mut in_fence = false;
++    for line in stock_instructions.lines() {
++        if line.trim_start().starts_with("```") {
++            in_fence = !in_fence;
++        }
++        let level = (!in_fence)
++            .then(|| line.chars().take_while(|c| *c == '#').count())
++            .filter(|level| *level > 0 && line[*level..].starts_with(' '));
++        if let Some(level) = level {
++            if dropping_level.is_some_and(|dropping| level <= dropping) {
++                dropping_level = None;
++            }
++            if dropping_level.is_none()
++                && BOSS_WORKER_DROPPED_STOCK_SECTIONS.contains(&line.trim_end())
++            {
++                dropping_level = Some(level);
++            }
++        }
++        if dropping_level.is_none() {
++            kept.push(line);
++        }
++    }
++    kept.join("\n").trim_end().to_string()
 +}
 +
 +pub(crate) fn append_boss_stock_instructions(
@@ -3265,7 +3309,7 @@ index c242c83c..728face3 100644
  impl SessionIo {
      /// Submit the `op` wrapped in a `Submission` with a unique ID.
      pub(crate) async fn submit(&self, op: Op) -> CodexResult<String> {
-@@ -1646,6 +1765,19 @@ impl Session {
+@@ -1646,6 +1809,19 @@ impl Session {
                  }
                  self.persist_rollout_items(&rollout_items).await;
  
@@ -3285,7 +3329,7 @@ index c242c83c..728face3 100644
                  // Forked threads should remain file-backed immediately after startup.
                  self.ensure_rollout_materialized(PersistContext::Standard)
                      .await;
-@@ -4215,10 +4347,14 @@ impl Session {
+@@ -4215,10 +4391,14 @@ impl Session {
              .plugins_for_config(&turn_context.config.plugins_config_input())
              .await
              .without_plugins(&turn_context.disabled_plugin_ids);
@@ -3300,7 +3344,7 @@ index c242c83c..728face3 100644
          {
              let auth = self.services.auth_manager.auth().await;
              let plugins_config = turn_context.config.plugins_config_input();
-@@ -5034,3 +5170,20 @@ mod elicitation_holders_tests;
+@@ -5034,3 +5214,20 @@ mod elicitation_holders_tests;
  
  #[cfg(test)]
  pub(crate) mod tests;
@@ -3744,7 +3788,7 @@ index c915037a..805b5abe 100644
              // The models manager already owns its catalog.
              model_catalog: None,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 723f85a8..ab1a7f21 100644
+index 723f85a8..e27cfd41 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -13,6 +13,7 @@ use crate::agents_md_manager::SessionInstructions;
@@ -3755,7 +3799,7 @@ index 723f85a8..ab1a7f21 100644
  use crate::context::ContextualUserFragment;
  use crate::context::DeveloperInstructions;
  use crate::context::GuardianContextMode;
-@@ -1698,6 +1699,124 @@ async fn user_shell_commands_remain_login_shells_when_model_login_shells_are_dis
+@@ -1698,6 +1699,193 @@ async fn user_shell_commands_remain_login_shells_when_model_login_shells_are_dis
      Ok(())
  }
  
@@ -3773,6 +3817,75 @@ index 723f85a8..ab1a7f21 100644
 +    super::strip_boss_stock_instructions(&mut base, Some("Stock model A base"));
 +    super::append_boss_stock_instructions(&mut base, "Stock model B base");
 +    assert_eq!(base, "Boss chat base\n\nStock model B base");
++}
++
++#[test]
++fn boss_worker_keeps_stock_guidance_but_not_the_solo_runner_sections() {
++    let stock = "\
++You are Codex.
++
++# When to ask the user for permission
++
++Stop only when you must.
++
++# Autonomy and persistence
++
++Persist until the user's goal is complete.
++
++# Personality
++
++Keep your own judgment.
++
++# Working with the user
++
++Treat a new message as steering.
++
++## Intermediate commentary
++
++Update the user every 60 seconds.
++
++## Final answer
++
++### Formatting rules
++
++- Use GitHub-flavored Markdown.
++
++```text
++# not a heading inside a fence
++```
++
++# Rules for getting work done
++
++- Reach for `rg` first.
++";
++
++    assert_eq!(
++        super::boss_worker_stock_instructions(stock),
++        "\
++You are Codex.
++
++# When to ask the user for permission
++
++Stop only when you must.
++
++# Personality
++
++Keep your own judgment.
++
++# Working with the user
++
++Treat a new message as steering.
++
++# Rules for getting work done
++
++- Reach for `rg` first."
++    );
++}
++
++#[test]
++fn boss_worker_stock_instructions_leave_a_prompt_without_those_sections_alone() {
++    let stock = "# Personality\n\nBe clear.\n\n# Rules for getting work done\n\n- Use rg.";
++    assert_eq!(super::boss_worker_stock_instructions(stock), stock);
 +}
 +
 +#[tokio::test]
@@ -3880,7 +3993,7 @@ index 723f85a8..ab1a7f21 100644
  #[tokio::test]
  async fn reload_user_config_layer_updates_effective_apps_config() {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -6107,6 +6226,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -6107,6 +6295,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
      .expect("initialize test hooks");
      let services = SessionServices {
          mcp_runtime,
@@ -3889,7 +4002,7 @@ index 723f85a8..ab1a7f21 100644
          mcp_handler_cache: Default::default(),
          unified_exec_manager: UnifiedExecProcessManager::new(
              config.background_terminal_max_timeout,
-@@ -8293,6 +8414,8 @@ where
+@@ -8293,6 +8483,8 @@ where
      .expect("initialize test hooks");
      let services = SessionServices {
          mcp_runtime,
@@ -3898,7 +4011,7 @@ index 723f85a8..ab1a7f21 100644
          mcp_handler_cache: Default::default(),
          unified_exec_manager: UnifiedExecProcessManager::new(
              config.background_terminal_max_timeout,
-@@ -11918,6 +12041,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -11918,6 +12110,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
          turn_store: Arc::new(codex_extension_api::ExtensionData::new(tc.sub_id.clone())),
          tool_runtime: test_tool_runtime(Arc::clone(&sess), Arc::clone(&tc)),
          cancellation_token: CancellationToken::new(),
