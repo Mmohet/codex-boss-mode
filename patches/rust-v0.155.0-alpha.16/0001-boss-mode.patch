@@ -2177,7 +2177,7 @@ index 25326c4d..b77c3ea6 100644
  const CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
  const CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index d5572f3c..e19e7ea7 100644
+index d5572f3c..94738937 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -459,6 +459,10 @@ pub struct ConfigToml {
@@ -2191,7 +2191,7 @@ index d5572f3c..e19e7ea7 100644
      /// Goal-related settings.
      pub goals: Option<GoalsToml>,
  
-@@ -684,6 +688,31 @@ pub struct GoalsToml {
+@@ -684,6 +688,36 @@ pub struct GoalsToml {
      pub max_goal_token_budget: Option<NonZeroU64>,
  }
  
@@ -2211,6 +2211,11 @@ index d5572f3c..e19e7ea7 100644
 +    /// colleague still working, the runtime waits for the next colleague
 +    /// message or user input instead of sampling again. Defaults to true.
 +    pub park_main_while_colleagues_work: Option<bool>,
++    /// Models on which the root thread runs as plain Codex instead of Boss
++    /// main: the stock prompt for that model, no Boss role, and its own tools
++    /// and permissions. Choosing one of them for a turn is how the user asks for
++    /// normal mode; any other model gets Boss main. Empty by default.
++    pub direct_models: Option<Vec<String>>,
 +    /// Headings of the stock-prompt sections a Boss worker does not receive,
 +    /// written exactly as they appear (for example `# Autonomy and persistence`).
 +    pub worker_dropped_stock_sections: Option<Vec<String>>,
@@ -2223,7 +2228,7 @@ index d5572f3c..e19e7ea7 100644
  #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
  #[schemars(deny_unknown_fields)]
  pub struct AgentsToml {
-@@ -701,6 +730,15 @@ pub struct AgentsToml {
+@@ -701,6 +735,15 @@ pub struct AgentsToml {
      pub default_subagent_model: Option<String>,
      /// Default reasoning effort for spawned subagents when the spawn call does not select one.
      pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
@@ -2352,7 +2357,7 @@ index 57b5daff..df4ad11e 100644
  
  #[derive(Debug, Clone, PartialEq)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index e53a95e2..21603cd9 100644
+index e53a95e2..a3ff40b8 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -36,6 +36,13 @@
@@ -2383,7 +2388,7 @@ index e53a95e2..21603cd9 100644
          }
        },
        "type": "object"
-@@ -459,6 +473,43 @@
+@@ -459,6 +473,50 @@
        ],
        "type": "object"
      },
@@ -2391,6 +2396,13 @@ index e53a95e2..21603cd9 100644
 +      "additionalProperties": false,
 +      "description": "Boss Mode settings that would otherwise be compiled in.",
 +      "properties": {
++        "direct_models": {
++          "description": "Models on which the root thread runs as plain Codex instead of Boss main: the stock prompt for that model, no Boss role, and its own tools and permissions. Choosing one of them for a turn is how the user asks for normal mode; any other model gets Boss main. Empty by default.",
++          "items": {
++            "type": "string"
++          },
++          "type": "array"
++        },
 +        "observation_rounds_per_turn": {
 +          "description": "Observation rounds Boss main may take in one turn: the first is free, each later one needs a visible rationale first. Defaults to 2.",
 +          "format": "uint8",
@@ -2427,7 +2439,7 @@ index e53a95e2..21603cd9 100644
      "BrowserUseConfigToml": {
        "additionalProperties": false,
        "properties": {
-@@ -688,6 +739,21 @@
+@@ -688,6 +746,21 @@
              "bedrock_setup_wizard": {
                "type": "boolean"
              },
@@ -2449,7 +2461,7 @@ index e53a95e2..21603cd9 100644
              "browser_use": {
                "type": "boolean"
              },
-@@ -1030,6 +1096,9 @@
+@@ -1030,6 +1103,9 @@
              "step_model_switching": {
                "type": "boolean"
              },
@@ -2459,7 +2471,7 @@ index e53a95e2..21603cd9 100644
              "telepathy": {
                "type": "boolean"
              },
-@@ -6207,6 +6276,14 @@
+@@ -6207,6 +6283,14 @@
        "minimum": 0.0,
        "type": "integer"
      },
@@ -2474,7 +2486,7 @@ index e53a95e2..21603cd9 100644
      "browser_use": {
        "$ref": "#/definitions/BrowserUseConfigToml"
      },
-@@ -6342,6 +6419,21 @@
+@@ -6342,6 +6426,21 @@
          "bedrock_setup_wizard": {
            "type": "boolean"
          },
@@ -2496,7 +2508,7 @@ index e53a95e2..21603cd9 100644
          "browser_use": {
            "type": "boolean"
          },
-@@ -6684,6 +6776,9 @@
+@@ -6684,6 +6783,9 @@
          "step_model_switching": {
            "type": "boolean"
          },
@@ -3476,10 +3488,28 @@ index f6bff6cd..ceb3e57f 100644
          for descendant_id in descendant_ids {
              match self.shutdown_live_agent(descendant_id).await {
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 4e8d9bff..1dd8c3cc 100644
+index 4e8d9bff..8393bc5b 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -855,6 +855,8 @@ impl AgentControl {
+@@ -4,6 +4,7 @@ use crate::agent::child_config::build_agent_resume_config;
+ use crate::agent::role::apply_role_to_config;
+ use crate::codex_thread::CodexThread;
+ use crate::config::PermissionProfileSnapshot;
++use crate::context::BossMainRole;
+ use crate::context::ContextualUserFragment;
+ use crate::context::CurrentTimeReminder;
+ use crate::context::CurrentTimeUnavailable;
+@@ -130,7 +131,9 @@ fn retain_forked_developer_message(
+             return true;
+         };
+ 
++        // Boss main's role belongs to the root; a colleague gets its own.
+         !(MultiAgentRoleInstructions::matches_text(text)
++            || BossMainRole::matches_text(text)
+             || (context_mode == GuardianContextMode::ThreadOwned
+                 && text.starts_with(
+                     crate::guardian::AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
+@@ -855,6 +858,8 @@ impl AgentControl {
  
          let parent_thread_id = *parent_thread_id;
          let parent_thread = state.get_thread(parent_thread_id).await?;
@@ -3488,7 +3518,40 @@ index 4e8d9bff..1dd8c3cc 100644
          let (subagent_developer_instructions, parent_developer_instructions) = match (
              multi_agent_version,
              config
-@@ -962,6 +964,11 @@ impl AgentControl {
+@@ -921,11 +926,27 @@ impl AgentControl {
+                     ResolvedModelMessages::bundled().multi_agent(),
+                     !parent_config.update_plan_enabled,
+                 );
+-                [parent_usage_hints.root, parent_usage_hints.subagent]
+-                    .into_iter()
+-                    .flatten()
+-                    .map(|instructions| instructions.render())
+-                    .collect()
++                // A root turn on one of `[boss] direct_models` showed the stock
++                // root guidance instead of the configured one.
++                let stock_root_usage_hint = resolve_usage_hints(
++                    &crate::config::MultiAgentV2Config {
++                        root_agent_usage_hint_text: None,
++                        ..parent_config.multi_agent_v2.clone()
++                    },
++                    ResolvedModelMessages::bundled().multi_agent(),
++                    !parent_config.update_plan_enabled,
++                )
++                .root
++                .filter(|_| !parent_config.boss_direct_models.is_empty());
++                [
++                    parent_usage_hints.root,
++                    parent_usage_hints.subagent,
++                    stock_root_usage_hint,
++                ]
++                .into_iter()
++                .flatten()
++                .map(|instructions| instructions.render())
++                .collect()
+             } else {
+                 Vec::new()
+             };
+@@ -962,6 +983,11 @@ impl AgentControl {
                      .inherited_user_message = true;
              }
              let response_item = &mut envelope.item;
@@ -3500,7 +3563,7 @@ index 4e8d9bff..1dd8c3cc 100644
              if matches!(response_item, ResponseItem::AgentMessage { .. }) {
                  return false;
              }
-@@ -1020,7 +1027,10 @@ impl AgentControl {
+@@ -1020,7 +1046,10 @@ impl AgentControl {
              true
          };
          forked_rollout_items.retain_mut(|item| {
@@ -3513,7 +3576,7 @@ index 4e8d9bff..1dd8c3cc 100644
                      && matches!(
                          &*item,
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index c2bd787c..3c118e65 100644
+index c2bd787c..e4a8254d 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -935,6 +935,22 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
@@ -3539,7 +3602,30 @@ index c2bd787c..3c118e65 100644
      if matches!(route, V2ReloadRoute::NestedParent) {
          let reloaded_turn = reloaded_child.session.new_default_turn().await;
          assert_eq!(
-@@ -3624,6 +3640,180 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
+@@ -2190,6 +2206,11 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
+                     text: "<multi_agent_mode>Proactive multi-agent delegation is active.</multi_agent_mode>"
+                         .to_string(),
+                 },
++                ContentItem::InputText {
++                    text: ContextualUserFragment::render(&crate::context::BossMainRole::Taken(
++                        "Parent Boss main role.".to_string(),
++                    )),
++                },
+                 ContentItem::InputText {
+                     text: "Preserved compacted developer context.".to_string(),
+                 },
+@@ -2319,6 +2340,10 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
+         ),
+         "forked child history should strip stale policy fragments from compound compacted messages"
+     );
++    assert!(
++        !history_contains_text(history.raw_items(), "Parent Boss main role."),
++        "Boss main's role belongs to the root, so a forked colleague must not inherit it"
++    );
+     assert!(
+         !history_contains_text(history.raw_items(), "Parent developer instructions."),
+         "forked child history should replace parent instructions in compacted replacement history"
+@@ -3624,6 +3649,180 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
      ));
  }
  
@@ -3813,8 +3899,34 @@ index 00000000..a8f3a293
 +    );
 +    assert_eq!(text("test.boss_text.untouched", "built in"), "built in");
 +}
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index e77b2c88..f071ae3b 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -272,7 +272,7 @@ async fn run_compact_task_inner_impl(
+         let turn_input_len = turn_input.len();
+         let prompt = Prompt {
+             input: turn_input,
+-            base_instructions: sess.get_prompt_base_instructions().await,
++            base_instructions: sess.prompt_base_instructions_for_turn(&turn_context).await,
+             ..Default::default()
+         };
+         let attempt_result = drain_to_completed(
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 60b5b1b7..57ac1062 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -37,7 +37,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+ ) -> CodexResult<RemoteCompactV2Attempt> {
+     let turn_context = &step_context.turn;
+     let mut history = sess.clone_history().await;
+-    let base_instructions = sess.get_prompt_base_instructions().await;
++    let base_instructions = sess.prompt_base_instructions_for_turn(turn_context).await;
+     let (rewritten_outputs, estimated_deleted_tokens) =
+         trim_function_call_history_to_fit_context_window(
+             &mut history,
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 7be3235f..82eca6b9 100644
+index 7be3235f..7d113b9b 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -2054,6 +2054,10 @@ respect_system_proxy = true
@@ -3953,7 +4065,7 @@ index 7be3235f..82eca6b9 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9348,6 +9463,108 @@ job_max_runtime_seconds = 900
+@@ -9348,6 +9463,118 @@ job_max_runtime_seconds = 900
      );
  }
  
@@ -3967,6 +4079,7 @@ index 7be3235f..82eca6b9 100644
 +                observation_rounds_per_turn: Some(3),
 +                recent_evidence_tokens: Some(9_000),
 +                park_main_while_colleagues_work: Some(false),
++                direct_models: Some(vec!["gpt-6-luna".to_string()]),
 +                worker_dropped_stock_sections: Some(vec!["# Personality".to_string()]),
 +                text: None,
 +            }),
@@ -3981,9 +4094,16 @@ index 7be3235f..82eca6b9 100644
 +            configured.boss_observation_rounds_per_turn,
 +            configured.boss_recent_evidence_tokens,
 +            configured.boss_park_main_while_colleagues_work,
++            configured.boss_direct_models,
 +            configured.boss_worker_dropped_stock_sections,
 +        ),
-+        (3, 9_000, false, vec!["# Personality".to_string()])
++        (
++            3,
++            9_000,
++            false,
++            vec!["gpt-6-luna".to_string()],
++            vec!["# Personality".to_string()]
++        )
 +    );
 +
 +    let defaults = Config::load_from_base_config_with_overrides(
@@ -3997,12 +4117,14 @@ index 7be3235f..82eca6b9 100644
 +            defaults.boss_observation_rounds_per_turn,
 +            defaults.boss_recent_evidence_tokens,
 +            defaults.boss_park_main_while_colleagues_work,
++            defaults.boss_direct_models,
 +            defaults.boss_worker_dropped_stock_sections.len(),
 +        ),
 +        (
 +            DEFAULT_BOSS_OBSERVATION_ROUNDS_PER_TURN,
 +            DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS,
 +            true,
++            Vec::<String>::new(),
 +            DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS.len(),
 +        )
 +    );
@@ -4062,7 +4184,7 @@ index 7be3235f..82eca6b9 100644
  #[tokio::test]
  async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
      let codex_home = TempDir::new()?;
-@@ -9357,6 +9574,8 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+@@ -9357,6 +9584,8 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
              max_depth: Some(2),
              default_subagent_model: Some("gpt-5.6-terra".to_string()),
              default_subagent_reasoning_effort: Some(ReasoningEffort::High),
@@ -4071,7 +4193,7 @@ index 7be3235f..82eca6b9 100644
              interrupt_message: Some(false),
              ..Default::default()
          }),
-@@ -9421,6 +9640,8 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
+@@ -9421,6 +9650,8 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4080,7 +4202,7 @@ index 7be3235f..82eca6b9 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9467,6 +9688,8 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
+@@ -9467,6 +9698,8 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4089,7 +4211,7 @@ index 7be3235f..82eca6b9 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9507,6 +9730,8 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
+@@ -9507,6 +9740,8 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4098,7 +4220,7 @@ index 7be3235f..82eca6b9 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9547,6 +9772,8 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
+@@ -9547,6 +9782,8 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4107,7 +4229,7 @@ index 7be3235f..82eca6b9 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -11836,7 +12063,7 @@ max_concurrent_threads_per_session = 17
+@@ -11836,7 +12073,7 @@ max_concurrent_threads_per_session = 17
      .expect("multi-agent v2 config should parse");
  
      let config = resolve_multi_agent_v2_config(&config_toml);
@@ -4116,7 +4238,7 @@ index 7be3235f..82eca6b9 100644
      let messages = ResolvedModelMessages::bundled().multi_agent();
      assert!(config.wait_agent_enabled);
      for wait_agent_enabled in [true, false] {
-@@ -11849,7 +12076,7 @@ max_concurrent_threads_per_session = 17
+@@ -11849,7 +12086,7 @@ max_concurrent_threads_per_session = 17
              let hint = hint.expect("default usage hints should be present").body();
              assert!(hint.contains(concurrency_guidance));
              assert_eq!(
@@ -4125,7 +4247,7 @@ index 7be3235f..82eca6b9 100644
                  wait_agent_enabled
              );
          }
-@@ -11937,12 +12164,7 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+@@ -11937,12 +12174,7 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
          let model_override_guidance = hint
              .strip_prefix(hint_without_model_overrides.as_str())
              .expect("model-override guidance should extend the base usage hint");
@@ -4139,7 +4261,7 @@ index 7be3235f..82eca6b9 100644
              assert!(
                  model_override_guidance.contains(required_fragment),
                  "model-override guidance should contain {required_fragment}"
-@@ -13113,3 +13335,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
+@@ -13113,3 +13345,119 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
  
      Ok(())
  }
@@ -4170,7 +4292,7 @@ index 7be3235f..82eca6b9 100644
 +}
 +
 +#[tokio::test]
-+async fn boss_flag_keeps_both_host_context_and_the_profile_role() -> std::io::Result<()> {
++async fn boss_flag_keeps_the_profile_role_apart_from_host_context() -> std::io::Result<()> {
 +    let codex_home = tempdir()?;
 +    let config_toml: ConfigToml = toml::from_str(
 +        "developer_instructions = \"# Boss role\\n\\nHold the goal.\"\n\n[features]\nboss_profile_role_survives_host = true\n",
@@ -4187,21 +4309,29 @@ index 7be3235f..82eca6b9 100644
 +    .await?;
 +
 +    assert_eq!(
-+        config.developer_instructions.as_deref(),
-+        Some("<app-context>host</app-context>\n\n# Boss role\n\nHold the goal."),
-+        "host context comes first so the profile role is read last"
++        (
++            config.developer_instructions.as_deref(),
++            config.boss_main_role.as_deref()
++        ),
++        (
++            Some("<app-context>host</app-context>"),
++            Some("# Boss role\n\nHold the goal.")
++        ),
++        "the role is shown only on Boss main turns, so it is not part of the host context"
 +    );
 +    Ok(())
 +}
 +
 +#[tokio::test]
-+async fn boss_flag_does_not_stack_the_profile_role_twice_on_resume() -> std::io::Result<()> {
++async fn boss_flag_takes_an_already_merged_role_out_of_a_resumed_host_value() -> std::io::Result<()>
++{
 +    let codex_home = tempdir()?;
 +    let config_toml: ConfigToml = toml::from_str(
 +        "developer_instructions = \"# Boss role\\n\\nHold the goal.\"\n\n[features]\nboss_profile_role_survives_host = true\n",
 +    )
 +    .expect("profile developer instructions should parse");
-+    // A resumed thread hands back a host value that already carries the role.
++    // A thread started before the role was kept apart hands back a host value
++    // that already carries it.
 +    let already_merged = "<app-context>host</app-context>\n\n# Boss role\n\nHold the goal.";
 +    let config = Config::load_from_base_config_with_overrides(
 +        config_toml,
@@ -4214,14 +4344,20 @@ index 7be3235f..82eca6b9 100644
 +    .await?;
 +
 +    assert_eq!(
-+        config.developer_instructions.as_deref(),
-+        Some(already_merged)
++        (
++            config.developer_instructions.as_deref(),
++            config.boss_main_role.as_deref()
++        ),
++        (
++            Some("<app-context>host</app-context>"),
++            Some("# Boss role\n\nHold the goal.")
++        )
 +    );
 +    Ok(())
 +}
 +
 +#[tokio::test]
-+async fn boss_flag_leaves_the_profile_role_alone_when_no_host_value_arrives() -> std::io::Result<()>
++async fn boss_flag_holds_the_profile_role_alone_when_no_host_value_arrives() -> std::io::Result<()>
 +{
 +    let codex_home = tempdir()?;
 +    let config_toml: ConfigToml = toml::from_str(
@@ -4236,14 +4372,17 @@ index 7be3235f..82eca6b9 100644
 +    .await?;
 +
 +    assert_eq!(
-+        config.developer_instructions.as_deref(),
-+        Some("# Boss role\n\nHold the goal."),
-+        "the CLI path sends no host value, so the profile role stands alone"
++        (
++            config.developer_instructions.as_deref(),
++            config.boss_main_role.as_deref()
++        ),
++        (None, Some("# Boss role\n\nHold the goal.")),
++        "the CLI path sends no host value, so there is only the role"
 +    );
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 2c17d687..388899e3 100644
+index 2c17d687..28589e6b 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -646,6 +646,16 @@ pub struct Config {
@@ -4263,7 +4402,7 @@ index 2c17d687..388899e3 100644
      /// Whether config explicitly selected named permissions profiles instead
      /// of the legacy `sandbox_mode` syntax.
      pub explicit_permission_profile_mode: bool,
-@@ -898,6 +908,25 @@ pub struct Config {
+@@ -898,6 +908,32 @@ pub struct Config {
      /// Default reasoning effort for spawned subagents when the spawn call does not select one.
      pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
  
@@ -4283,13 +4422,20 @@ index 2c17d687..388899e3 100644
 +    /// Whether Boss main waits off-model while colleagues work; see `[boss]`.
 +    pub boss_park_main_while_colleagues_work: bool,
 +
++    /// Models on which the root runs as plain Codex instead of Boss main.
++    pub boss_direct_models: Vec<String>,
++
++    /// The profile's Boss main role, kept apart from the host's developer
++    /// instructions so it is shown only while the root runs as Boss main.
++    pub boss_main_role: Option<String>,
++
 +    /// Stock-prompt section headings a Boss worker does not receive.
 +    pub boss_worker_dropped_stock_sections: Vec<String>,
 +
      /// Whether to record a model-visible message when an agent turn is interrupted.
      pub agent_interrupt_message_enabled: bool,
  
-@@ -1519,11 +1548,47 @@ impl ConfigBuilder {
+@@ -1519,11 +1555,47 @@ impl ConfigBuilder {
      }
  }
  
@@ -4337,7 +4483,7 @@ index 2c17d687..388899e3 100644
      /// Resolves the configured, reviewer-catalog, or bundled Guardian policy.
      pub fn resolve_guardian_policy<'a>(
          &'a self,
-@@ -1627,6 +1692,7 @@ impl Config {
+@@ -1627,6 +1699,7 @@ impl Config {
                      Some(BaseInstructionsProvenance::Model { .. })
                  )
              }),
@@ -4345,7 +4491,7 @@ index 2c17d687..388899e3 100644
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
          }
-@@ -1644,7 +1710,10 @@ impl Config {
+@@ -1644,7 +1717,10 @@ impl Config {
          } else {
              OutboundProxyPolicy::ReqwestDefault
          };
@@ -4357,7 +4503,7 @@ index 2c17d687..388899e3 100644
          if self.features.enabled(Feature::Psp) {
              factory.with_chatgpt_cookies([HeaderValue::from_static("oai-chat-psp=true")])
          } else {
-@@ -2973,17 +3042,8 @@ pub fn resolve_bootstrap_respect_system_proxy(
+@@ -2973,17 +3049,8 @@ pub fn resolve_bootstrap_respect_system_proxy(
      cfg: &ConfigToml,
      feature_requirements: Option<&Sourced<FeatureRequirementsToml>>,
  ) -> std::io::Result<bool> {
@@ -4377,7 +4523,7 @@ index 2c17d687..388899e3 100644
  }
  
  /// Resolves auth route settings for the initial cloud-config bootstrap.
-@@ -3000,14 +3060,28 @@ pub fn resolve_bootstrap_http_client_factory(
+@@ -3000,14 +3067,28 @@ pub fn resolve_bootstrap_http_client_factory(
      cfg: &ConfigToml,
      feature_requirements: Option<&Sourced<FeatureRequirementsToml>>,
  ) -> std::io::Result<HttpClientFactory> {
@@ -4414,7 +4560,7 @@ index 2c17d687..388899e3 100644
  }
  
  pub(crate) fn resolve_web_search_mode_for_turn(
-@@ -3799,6 +3873,34 @@ impl Config {
+@@ -3799,6 +3880,35 @@ impl Config {
              .agents
              .as_ref()
              .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
@@ -4439,6 +4585,7 @@ index 2c17d687..388899e3 100644
 +            .unwrap_or(DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS);
 +        let boss_park_main_while_colleagues_work =
 +            boss.park_main_while_colleagues_work.unwrap_or(true);
++        let boss_direct_models = boss.direct_models.unwrap_or_default();
 +        let boss_worker_dropped_stock_sections =
 +            boss.worker_dropped_stock_sections.unwrap_or_else(|| {
 +                DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS
@@ -4449,7 +4596,7 @@ index 2c17d687..388899e3 100644
          let agent_interrupt_message_enabled = cfg
              .agents
              .as_ref()
-@@ -3902,7 +4004,29 @@ impl Config {
+@@ -3902,7 +4012,32 @@ impl Config {
          let base_instructions_provenance = base_instructions
              .as_ref()
              .map(|_| BaseInstructionsProvenance::Custom);
@@ -4458,29 +4605,32 @@ index 2c17d687..388899e3 100644
 +        // developer instructions when it starts a thread, and plain `or` then
 +        // drops the profile's role with no warning — so the same profile behaves
 +        // one way under the app and another under the CLI, which sends nothing.
-+        // Keep both. Host context goes first so the profile's role is the last
-+        // thing read rather than being buried ahead of a large dynamic block.
-+        // The containment check stops a resumed thread, whose host value may
-+        // already carry the profile text, from stacking it a second time.
-+        let developer_instructions =
++        // Keep both, but apart: the role is shown only on turns where the root
++        // runs as Boss main (see `boss_direct_models`), after the host context
++        // so it is the last thing read. A resumed thread's host value may
++        // already carry the role from before they were kept apart; take it out
++        // so it is not shown twice.
++        let (developer_instructions, boss_main_role) =
 +            if features.enabled(Feature::BossProfileRoleSurvivesHost) {
-+                match (developer_instructions, cfg.developer_instructions) {
-+                    (Some(host), Some(profile)) => {
-+                        if host.contains(profile.trim()) {
-+                            Some(host)
-+                        } else {
-+                            Some(format!("{host}\n\n{profile}"))
-+                        }
++                let role = cfg
++                    .developer_instructions
++                    .filter(|role| !role.trim().is_empty());
++                let host = match (developer_instructions, role.as_deref()) {
++                    (Some(host), Some(role)) if host.contains(role.trim()) => {
++                        let host = host.replace(role.trim(), "");
++                        let host = host.trim_end();
++                        (!host.is_empty()).then(|| host.to_string())
 +                    }
-+                    (host, profile) => host.or(profile),
-+                }
++                    (host, _) => host,
++                };
++                (host, role)
 +            } else {
-+                developer_instructions.or(cfg.developer_instructions)
++                (developer_instructions.or(cfg.developer_instructions), None)
 +            };
          let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
          let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
          let include_collaboration_mode_instructions =
-@@ -4179,6 +4303,8 @@ impl Config {
+@@ -4179,6 +4314,8 @@ impl Config {
                  windows_sandbox_type,
                  windows_sandbox_private_desktop,
              },
@@ -4489,7 +4639,7 @@ index 2c17d687..388899e3 100644
              explicit_permission_profile_mode,
              custom_permission_profiles,
              approvals_reviewer: constrained_approvals_reviewer.value(),
-@@ -4241,6 +4367,12 @@ impl Config {
+@@ -4241,6 +4378,14 @@ impl Config {
              agent_max_threads,
              agent_default_subagent_model,
              agent_default_subagent_reasoning_effort,
@@ -4498,10 +4648,56 @@ index 2c17d687..388899e3 100644
 +            boss_observation_rounds_per_turn,
 +            boss_recent_evidence_tokens,
 +            boss_park_main_while_colleagues_work,
++            boss_direct_models,
++            boss_main_role,
 +            boss_worker_dropped_stock_sections,
              agent_max_depth,
              agent_roles,
              max_goal_token_budget: cfg
+diff --git a/codex-rs/core/src/context/boss_main_role.rs b/codex-rs/core/src/context/boss_main_role.rs
+new file mode 100644
+index 00000000..ddfaccf7
+--- /dev/null
++++ b/codex-rs/core/src/context/boss_main_role.rs
+@@ -0,0 +1,38 @@
++use super::ContextualUserFragment;
++use codex_protocol::models::ContentItemKind;
++
++const SET_ASIDE: &str = "\nThe user has chosen to work with you directly from here on, so the lead role described earlier is set aside. Do the work yourself with your own tools, as a normal Codex session would. Colleagues from earlier are still there if the user asks for them.\n";
++
++/// Boss main's role, shown while the root thread runs as Boss main, or the
++/// note that sets it aside when the user switches to a model that runs the
++/// root as plain Codex.
++#[derive(Debug, Clone, PartialEq)]
++pub(crate) enum BossMainRole {
++    Taken(String),
++    SetAside,
++}
++
++impl ContextualUserFragment for BossMainRole {
++    fn content_kind(&self) -> ContentItemKind {
++        ContentItemKind("boss.main_role".to_string())
++    }
++
++    fn role(&self) -> &'static str {
++        "developer"
++    }
++
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<boss_main_role>", "</boss_main_role>")
++    }
++
++    fn body(&self) -> String {
++        match self {
++            Self::Taken(role) => format!("\n{}\n", role.trim()),
++            Self::SetAside => crate::boss_text::text("main_role.set_aside", SET_ASIDE),
++        }
++    }
++}
 diff --git a/codex-rs/core/src/context/connector_inventory.rs b/codex-rs/core/src/context/connector_inventory.rs
 new file mode 100644
 index 00000000..b82db706
@@ -4608,18 +4804,28 @@ index 006a02cb..535fa1a2 100644
              self.task_name,
              self.sender,
 diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
-index eef3c7d6..a5e9f87b 100644
+index eef3c7d6..c716ac38 100644
 --- a/codex-rs/core/src/context/mod.rs
 +++ b/codex-rs/core/src/context/mod.rs
-@@ -5,6 +5,7 @@ mod apps_instructions;
+@@ -4,7 +4,9 @@ mod approved_command_prefix_saved;
+ mod apps_instructions;
  mod available_plugins_instructions;
  mod base_instructions;
++mod boss_main_role;
  mod compaction_summary;
 +mod connector_inventory;
  mod contextual_user_message;
  mod current_time_reminder;
  mod developer_instructions;
-@@ -61,6 +62,7 @@ pub use codex_context_fragments::ContextualUserFragment;
+@@ -54,6 +56,7 @@ pub(crate) use approved_command_prefix_saved::ApprovedCommandPrefixSaved;
+ pub(crate) use apps_instructions::AppsInstructions;
+ pub(crate) use available_plugins_instructions::AvailablePluginsInstructions;
+ pub(crate) use base_instructions::BaseInstructionsFragment;
++pub(crate) use boss_main_role::BossMainRole;
+ pub(crate) use codex_context_fragments::AdditionalContextDeveloperFragment;
+ pub(crate) use codex_context_fragments::AdditionalContextUserFragment;
+ pub use codex_context_fragments::AnsweredQuestion;
+@@ -61,6 +64,7 @@ pub use codex_context_fragments::ContextualUserFragment;
  pub(crate) use codex_prompts::MultiAgentRoleInstructions;
  pub use codex_prompts::PermissionsInstructions;
  pub(crate) use compaction_summary::CompactionSummary;
@@ -4627,6 +4833,168 @@ index eef3c7d6..a5e9f87b 100644
  pub(crate) use contextual_user_message::is_contextual_user_fragment;
  pub(crate) use contextual_user_message::is_user_authorization_message;
  pub(crate) use contextual_user_message::parse_visible_hook_prompt_message;
+diff --git a/codex-rs/core/src/context/world_state/boss_main_role.rs b/codex-rs/core/src/context/world_state/boss_main_role.rs
+new file mode 100644
+index 00000000..e36443f2
+--- /dev/null
++++ b/codex-rs/core/src/context/world_state/boss_main_role.rs
+@@ -0,0 +1,89 @@
++use super::PreviousSectionState;
++use super::WorldStateHash;
++use super::WorldStateSection;
++use crate::context::BossMainRole;
++use crate::context::ContextualUserFragment;
++use serde::Deserialize;
++use serde::Serialize;
++
++/// Whether the root thread currently runs as Boss main, and with which role.
++///
++/// The model picker is the switch: a turn on one of `[boss] direct_models`
++/// runs the root as plain Codex, any other model runs it as Boss main. The
++/// role is rendered when Boss main starts, or when its text changes, and a
++/// short note sets it aside when the user switches to plain Codex.
++#[derive(Clone, Debug)]
++pub(crate) struct BossMainRoleState {
++    role: String,
++    active: bool,
++}
++
++#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
++pub(crate) struct BossMainRoleSnapshot {
++    active: bool,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    role: Option<WorldStateHash>,
++}
++
++impl BossMainRoleState {
++    pub(crate) fn new(role: &str, active: bool) -> Self {
++        Self {
++            role: role.to_string(),
++            active,
++        }
++    }
++}
++
++impl WorldStateSection for BossMainRoleState {
++    const ID: &'static str = "boss_main_role";
++    type Snapshot = BossMainRoleSnapshot;
++
++    fn snapshot(&self) -> Self::Snapshot {
++        BossMainRoleSnapshot {
++            active: self.active,
++            role: self
++                .active
++                .then(|| WorldStateHash::from_fragment(&BossMainRole::Taken(self.role.clone()))),
++        }
++    }
++
++    /// Threads started before the role was kept apart carry it inside the host
++    /// developer instructions.
++    fn matches_current_legacy_fragment(&self, role: &str, text: &str) -> bool {
++        role == "developer" && text.contains(self.role.trim())
++    }
++
++    fn has_retained_fragment_matcher() -> bool {
++        true
++    }
++
++    fn matches_retained_fragment(role: &str, text: &str) -> bool {
++        role == "developer" && BossMainRole::matches_text(text)
++    }
++
++    fn render_diff(
++        &self,
++        previous: PreviousSectionState<'_, Self::Snapshot>,
++    ) -> Option<Box<dyn ContextualUserFragment>> {
++        let was_active = match previous {
++            PreviousSectionState::Known(previous) if previous == &self.snapshot() => return None,
++            PreviousSectionState::Known(previous) => previous.active,
++            // A legacy thread already shows this role inside its older instructions.
++            PreviousSectionState::Unknown if self.active => return None,
++            PreviousSectionState::Unknown => true,
++            PreviousSectionState::Absent => false,
++        };
++        if self.active {
++            // Boss main starts, or its role changed since it was last shown.
++            Some(Box::new(BossMainRole::Taken(self.role.clone())))
++        } else if was_active {
++            Some(Box::new(BossMainRole::SetAside))
++        } else {
++            None
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "boss_main_role_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/context/world_state/boss_main_role_tests.rs b/codex-rs/core/src/context/world_state/boss_main_role_tests.rs
+new file mode 100644
+index 00000000..1fbe9463
+--- /dev/null
++++ b/codex-rs/core/src/context/world_state/boss_main_role_tests.rs
+@@ -0,0 +1,61 @@
++use super::*;
++use pretty_assertions::assert_eq;
++
++const ROLE: &str = "# Boss\n\nHold the goal.";
++
++fn rendered(
++    state: &BossMainRoleState,
++    previous: PreviousSectionState<'_, BossMainRoleSnapshot>,
++) -> Option<String> {
++    state
++        .render_diff(previous)
++        .map(|fragment| fragment.render())
++}
++
++#[test]
++fn the_role_follows_the_mode_the_model_picker_chose() {
++    let boss = BossMainRoleState::new(ROLE, /*active*/ true);
++    let direct = BossMainRoleState::new(ROLE, /*active*/ false);
++    let taken = Some(BossMainRole::Taken(ROLE.to_string()).render());
++    let set_aside = Some(BossMainRole::SetAside.render());
++
++    assert_eq!(
++        vec![
++            rendered(&boss, PreviousSectionState::Absent),
++            rendered(&direct, PreviousSectionState::Absent),
++            rendered(&direct, PreviousSectionState::Known(&boss.snapshot())),
++            rendered(&boss, PreviousSectionState::Known(&direct.snapshot())),
++            rendered(&boss, PreviousSectionState::Known(&boss.snapshot())),
++            rendered(&direct, PreviousSectionState::Known(&direct.snapshot())),
++        ],
++        vec![taken.clone(), None, set_aside, taken, None, None],
++        "starts on Boss, starts direct, Boss to direct, direct to Boss, unchanged twice"
++    );
++}
++
++#[test]
++fn a_changed_role_is_shown_again_while_boss_main_runs() {
++    let before = BossMainRoleState::new(ROLE, /*active*/ true);
++    let after = BossMainRoleState::new("# Boss\n\nHold the goal, and the team.", true);
++
++    assert_eq!(
++        rendered(&after, PreviousSectionState::Known(&before.snapshot())),
++        Some(BossMainRole::Taken("# Boss\n\nHold the goal, and the team.".to_string()).render())
++    );
++}
++
++#[test]
++fn a_legacy_thread_keeps_the_role_it_already_shows_until_the_user_switches_to_direct() {
++    let boss = BossMainRoleState::new(ROLE, /*active*/ true);
++    let direct = BossMainRoleState::new(ROLE, /*active*/ false);
++    let merged = format!("<app-context>host</app-context>\n\n{ROLE}");
++
++    assert_eq!(
++        (
++            boss.matches_current_legacy_fragment("developer", &merged),
++            rendered(&boss, PreviousSectionState::Unknown),
++            rendered(&direct, PreviousSectionState::Unknown),
++        ),
++        (true, None, Some(BossMainRole::SetAside.render()))
++    );
++}
 diff --git a/codex-rs/core/src/context/world_state/connector_inventory.rs b/codex-rs/core/src/context/world_state/connector_inventory.rs
 new file mode 100644
 index 00000000..7b98f968
@@ -4684,19 +5052,24 @@ index 00000000..7b98f968
 +    }
 +}
 diff --git a/codex-rs/core/src/context/world_state/mod.rs b/codex-rs/core/src/context/world_state/mod.rs
-index ef03b155..250187ce 100644
+index ef03b155..8ed77452 100644
 --- a/codex-rs/core/src/context/world_state/mod.rs
 +++ b/codex-rs/core/src/context/world_state/mod.rs
-@@ -2,6 +2,7 @@ mod agents_md;
+@@ -1,7 +1,9 @@
+ mod agents_md;
  mod apps_instructions;
++mod boss_main_role;
  mod collaboration_mode;
  mod compact_permissions;
 +mod connector_inventory;
  mod context_window_guidance;
  mod environment;
  mod environments_instructions;
-@@ -39,6 +40,7 @@ pub(crate) use agents_md::AgentsMdState;
+@@ -37,8 +39,10 @@ use std::fmt;
+ 
+ pub(crate) use agents_md::AgentsMdState;
  pub(crate) use apps_instructions::AppsInstructionsState;
++pub(crate) use boss_main_role::BossMainRoleState;
  pub(crate) use collaboration_mode::CollaborationModeState;
  pub(crate) use compact_permissions::CompactPermissionsState;
 +pub(crate) use connector_inventory::ConnectorInventoryState;
@@ -4925,6 +5298,52 @@ index 8f3a347d..1916460a 100644
  mod history;
  mod normalize;
  pub(crate) mod updates;
+diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
+index c1993ab5..429c2b16 100644
+--- a/codex-rs/core/src/environment_selection.rs
++++ b/codex-rs/core/src/environment_selection.rs
+@@ -17,6 +17,7 @@ use codex_protocol::capabilities::CapabilityRootLocation;
+ use codex_protocol::capabilities::SelectedCapabilityRoot;
+ use codex_protocol::config_types::ShellEnvironmentPolicy;
+ use codex_protocol::models::PermissionProfile;
++use codex_protocol::models::PermissionProfileSnapshot;
+ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::EnvironmentConfig;
+ use codex_protocol::protocol::EnvironmentConfigState;
+@@ -1010,6 +1011,33 @@ impl TurnEnvironmentSnapshot {
+             .unwrap_or_else(fallback)
+     }
+ 
++    /// Boss Mode: a root turn the user chose plain Codex for works with the
++    /// thread's own permissions. Environments configured from the thread carry
++    /// Boss main's read-only projection of them, so they get `permission_profile`
++    /// instead; owner-provided environments keep their owner's configuration.
++    pub(crate) fn with_thread_permission_profile(
++        mut self,
++        permission_profile: &PermissionProfileSnapshot,
++    ) -> Self {
++        for environment in &mut self.environments {
++            let (selection, config_origin) = match environment {
++                TurnEnvironmentState::Ready(environment) => {
++                    (&mut environment.selection, environment.config_origin)
++                }
++                TurnEnvironmentState::Starting(environment) => {
++                    (&mut environment.selection, environment.config_origin)
++                }
++                TurnEnvironmentState::Failed { .. } => continue,
++            };
++            if config_origin == EnvironmentConfigOrigin::Thread
++                && let EnvironmentConfigState::Ready(config) = &mut selection.config
++            {
++                config.permission_profile = permission_profile.clone();
++            }
++        }
++        self
++    }
++
+     pub(crate) fn local(&self) -> Option<&TurnEnvironment> {
+         self.turn_environments()
+             .find(|environment| !environment.environment.is_remote())
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
 index ea8e1b29..b0413b9c 100644
 --- a/codex-rs/core/src/lib.rs
@@ -4937,11 +5356,161 @@ index ea8e1b29..b0413b9c 100644
  mod codex_delegate;
  mod command_canonicalization;
  pub mod config;
+diff --git a/codex-rs/core/src/session/boss_direct.rs b/codex-rs/core/src/session/boss_direct.rs
+new file mode 100644
+index 00000000..03f504a1
+--- /dev/null
++++ b/codex-rs/core/src/session/boss_direct.rs
+@@ -0,0 +1,51 @@
++//! Boss Mode: root turns the user chose plain Codex for by their model.
++
++use super::Session;
++use crate::session::turn_context::TurnContext;
++use codex_prompts::render_model_instructions;
++use codex_protocol::models::BaseInstructions;
++use codex_protocol::models::BaseInstructionsProvenance;
++
++impl Session {
++    /// The base instructions a request on this turn is sent with.
++    ///
++    /// A root turn on one of `[boss] direct_models` gets the stock instructions
++    /// for its model, as a normal Codex thread would, instead of the Boss base
++    /// the thread holds. Switching models already starts a new prompt cache, so
++    /// changing the instructions with the mode costs nothing more.
++    pub(crate) async fn prompt_base_instructions_for_turn(
++        &self,
++        turn_context: &TurnContext,
++    ) -> BaseInstructions {
++        if !crate::tools::boss_direct_turn(turn_context) {
++            return self.get_prompt_base_instructions().await;
++        }
++        let model = &turn_context.model_info().slug;
++        let mut stock_overrides = turn_context.config.to_models_manager_config();
++        stock_overrides.base_instructions = None;
++        stock_overrides.custom_base_replaces_stock = false;
++        let model_info = self
++            .services
++            .models_manager
++            .get_model_info(model, &stock_overrides)
++            .await;
++        let text = render_model_instructions(&model_info);
++        let text = if !turn_context.config.update_plan_enabled
++            && turn_context.config.model_catalog.is_none()
++        {
++            codex_prompts::without_update_plan_instructions(&text)
++        } else {
++            text
++        };
++        BaseInstructions {
++            text,
++            provenance: Some(BaseInstructionsProvenance::Model {
++                model: model.clone(),
++            }),
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "boss_direct_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/session/boss_direct_tests.rs b/codex-rs/core/src/session/boss_direct_tests.rs
+new file mode 100644
+index 00000000..85ed2479
+--- /dev/null
++++ b/codex-rs/core/src/session/boss_direct_tests.rs
+@@ -0,0 +1,79 @@
++use super::*;
++use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
++use codex_features::Feature;
++use codex_login::CodexAuth;
++use codex_protocol::models::PermissionProfile;
++use codex_protocol::permissions::FileSystemAccessMode;
++use codex_protocol::protocol::SessionSource;
++use pretty_assertions::assert_eq;
++use std::sync::Arc;
++
++const BOSS_BASE: &str = "# Boss base";
++
++fn can_write(profile: &PermissionProfile) -> bool {
++    profile
++        .file_system_sandbox_policy()
++        .entries
++        .iter()
++        .any(|entry| entry.access == FileSystemAccessMode::Write)
++}
++
++/// A root Boss session whose model is, or is not, one of `[boss] direct_models`.
++async fn root_turn(direct: bool) -> (Arc<Session>, Arc<TurnContext>) {
++    let (session, turn, _events) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        |config| {
++            config
++                .features
++                .enable(Feature::BossMainDecisionLayer)
++                .expect("Boss decision-layer feature should be enabled");
++            config
++                .permissions
++                .set_permission_profile(PermissionProfile::workspace_write())
++                .expect("workspace-write profile should be accepted");
++            super::super::apply_boss_main_decision_layer(config, &SessionSource::Cli)
++                .expect("root Boss permissions should be narrowed");
++            config.base_instructions = Some(BOSS_BASE.to_string());
++            config.base_instructions_provenance = Some(BaseInstructionsProvenance::Custom);
++            if direct {
++                config.boss_direct_models = vec![config.model.clone().expect("test model")];
++            }
++        },
++    )
++    .await;
++    (session, turn)
++}
++
++#[tokio::test]
++async fn a_root_turn_on_a_direct_model_runs_like_normal_codex() {
++    let (boss_session, boss_turn) = root_turn(/*direct*/ false).await;
++    let (direct_session, direct_turn) = root_turn(/*direct*/ true).await;
++
++    let boss_base = boss_session
++        .prompt_base_instructions_for_turn(&boss_turn)
++        .await;
++    let direct_base = direct_session
++        .prompt_base_instructions_for_turn(&direct_turn)
++        .await;
++    assert_eq!(
++        (
++            can_write(&boss_turn.permission_profile()),
++            can_write(&direct_turn.permission_profile()),
++            boss_base.text == BOSS_BASE,
++            direct_base.text == BOSS_BASE,
++            direct_base.provenance,
++        ),
++        (
++            false,
++            true,
++            true,
++            false,
++            Some(BaseInstructionsProvenance::Model {
++                model: direct_turn.model_info().slug.clone(),
++            }),
++        ),
++        "Boss main stays read-only on the Boss base; a direct turn gets the thread's \
++         permissions and the stock instructions for its model"
++    );
++}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index c242c83c..956139de 100644
+index c242c83c..697b4a7f 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -507,6 +507,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+@@ -227,6 +227,7 @@ use codex_protocol::error::Result as CodexResult;
+ #[cfg(test)]
+ use codex_protocol::exec_output::StreamOutput;
+ 
++mod boss_direct;
+ mod code_mode_warning;
+ pub(crate) mod context_window;
+ mod daemon_recovery;
+@@ -507,6 +508,63 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
  const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
  const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
  
@@ -5005,7 +5574,7 @@ index c242c83c..956139de 100644
  impl Session {
      /// Spawn and initialize a new session.
      /// Hide the concrete startup future from callers while keeping initialization lazy.
-@@ -542,7 +599,7 @@ impl Session {
+@@ -542,7 +600,7 @@ impl Session {
      async fn spawn_internal(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
          let SessionSpawnArgs {
              startup,
@@ -5014,7 +5583,7 @@ index c242c83c..956139de 100644
              allow_provider_model_fallback,
              instructions,
              installation_id,
-@@ -588,6 +645,7 @@ impl Session {
+@@ -588,6 +646,7 @@ impl Session {
          let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
          let (tx_event, rx_event) = async_channel::unbounded();
  
@@ -5022,7 +5591,7 @@ index c242c83c..956139de 100644
          let isolation = thread_extension_init
              .get::<codex_extension_api::SessionIsolation>()
              .map(|policy| *policy)
-@@ -739,12 +797,50 @@ impl Session {
+@@ -739,12 +798,50 @@ impl Session {
          let history_mode = conversation_history.get_history_mode(
              requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
          );
@@ -5074,7 +5643,7 @@ index c242c83c..956139de 100644
          // Dynamic tools are defined at thread start and persisted in rollout session metadata.
          let dynamic_tools = if dynamic_tools.is_empty() {
              conversation_history.get_dynamic_tools().unwrap_or_default()
-@@ -947,6 +1043,69 @@ impl Session {
+@@ -947,6 +1044,69 @@ impl Session {
      }
  }
  
@@ -5144,7 +5713,7 @@ index c242c83c..956139de 100644
  impl SessionIo {
      /// Submit the `op` wrapped in a `Submission` with a unique ID.
      pub(crate) async fn submit(&self, op: Op) -> CodexResult<String> {
-@@ -1646,6 +1805,19 @@ impl Session {
+@@ -1646,6 +1806,19 @@ impl Session {
                  }
                  self.persist_rollout_items(&rollout_items).await;
  
@@ -5164,7 +5733,7 @@ index c242c83c..956139de 100644
                  // Forked threads should remain file-backed immediately after startup.
                  self.ensure_rollout_materialized(PersistContext::Standard)
                      .await;
-@@ -2310,6 +2482,18 @@ impl Session {
+@@ -2310,6 +2483,18 @@ impl Session {
  
      /// Persist the event to rollout and send it to clients.
      pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
@@ -5183,7 +5752,7 @@ index c242c83c..956139de 100644
          let legacy_source = msg.clone();
          if let EventMsg::Error(error) = &legacy_source
              && error
-@@ -2352,8 +2536,10 @@ impl Session {
+@@ -2352,8 +2537,10 @@ impl Session {
                  .track_guardian_session_event(self.thread_id, &event);
          }
          self.send_event_raw(event).await;
@@ -5196,7 +5765,7 @@ index c242c83c..956139de 100644
          self.maybe_mirror_event_text_to_realtime(&legacy_source)
              .await;
          self.maybe_clear_realtime_handoff_for_event(&legacy_source)
-@@ -4215,10 +4401,14 @@ impl Session {
+@@ -4215,10 +4402,14 @@ impl Session {
              .plugins_for_config(&turn_context.config.plugins_config_input())
              .await
              .without_plugins(&turn_context.disabled_plugin_ids);
@@ -5211,7 +5780,7 @@ index c242c83c..956139de 100644
          {
              let auth = self.services.auth_manager.auth().await;
              let plugins_config = turn_context.config.plugins_config_input();
-@@ -5034,3 +5224,20 @@ mod elicitation_holders_tests;
+@@ -5034,3 +5225,20 @@ mod elicitation_holders_tests;
  
  #[cfg(test)]
  pub(crate) mod tests;
@@ -5233,10 +5802,32 @@ index c242c83c..956139de 100644
 +    }
 +}
 diff --git a/codex-rs/core/src/session/multi_agents.rs b/codex-rs/core/src/session/multi_agents.rs
-index 51e43a4d..c3d52481 100644
+index 51e43a4d..3ab0906f 100644
 --- a/codex-rs/core/src/session/multi_agents.rs
 +++ b/codex-rs/core/src/session/multi_agents.rs
-@@ -46,39 +46,136 @@ pub(crate) fn resolve_usage_hints(
+@@ -24,8 +24,20 @@ pub(super) fn usage_hint_text(step_context: &StepContext) -> Option<MultiAgentRo
+ 
+     let multi_agent_messages =
+         ResolvedModelMessages::from_model(&step_context.settings.model_info).multi_agent();
++    // Boss Mode: a root turn the user chose plain Codex for gets the stock root
++    // guidance rather than Boss main's.
++    let stock_root;
++    let multi_agent_v2 = if crate::tools::boss_direct_turn(turn_context) {
++        stock_root = MultiAgentV2Config {
++            root_agent_usage_hint_text: None,
++            ..turn_context.config.multi_agent_v2.clone()
++        };
++        &stock_root
++    } else {
++        &turn_context.config.multi_agent_v2
++    };
+     let snapshot = resolve_usage_hints(
+-        &turn_context.config.multi_agent_v2,
++        multi_agent_v2,
+         multi_agent_messages,
+         !turn_context.config.update_plan_enabled && turn_context.config.model_catalog.is_none(),
+     );
+@@ -46,39 +58,136 @@ pub(crate) fn resolve_usage_hints(
      multi_agent_messages: ResolvedMultiAgentMessages<'_>,
      omit_update_plan_instructions: bool,
  ) -> ResolvedMultiAgentV2UsageHints {
@@ -5392,6 +5983,14 @@ index 51e43a4d..c3d52481 100644
  pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<MultiAgentMode> {
      let turn_context = step_context.turn.as_ref();
      let settings = &step_context.settings;
+@@ -93,6 +202,7 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
+         .multi_agent_v2
+         .multi_agent_mode_hint_text
+         .as_deref()
++        .filter(|_| !crate::tools::boss_direct_turn(turn_context))
+         .or(multi_agent_messages.hint);
+     let multi_agent_mode = match hint {
+         Some(text) => MultiAgentMode::Custom(text.to_owned()),
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
 index 9f6d02e1..f1b59c7d 100644
 --- a/codex-rs/core/src/session/session.rs
@@ -5947,7 +6546,7 @@ index 723f85a8..1cd3fc69 100644
  
      let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 24e59a33..bd30b571 100644
+index 24e59a33..699cd5b5 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -40,6 +40,7 @@ use crate::session::session::Session;
@@ -6012,6 +6611,15 @@ index 24e59a33..bd30b571 100644
      Prompt {
          input,
          tools: step_context.tool_router.model_visible_specs(),
+@@ -1562,7 +1583,7 @@ async fn run_sampling_request(
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+     let turn_context = Arc::clone(&step_context.turn);
+-    let base_instructions = sess.get_prompt_base_instructions().await;
++    let base_instructions = sess.prompt_base_instructions_for_turn(&turn_context).await;
+ 
+     let tool_runtime = ToolCallRuntime::new(
+         Arc::clone(&sess),
 @@ -1800,6 +1821,88 @@ pub(crate) async fn built_tools(
  struct SamplingRequestResult {
      needs_follow_up: bool,
@@ -6188,7 +6796,7 @@ index 24e59a33..bd30b571 100644
  
      if should_emit_token_count {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index ae88a809..ce378dcf 100644
+index ae88a809..e9bd929e 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -21,6 +21,8 @@ use codex_protocol::SessionId;
@@ -6241,6 +6849,41 @@ index ae88a809..ce378dcf 100644
      /// Legacy: returns the frozen initial-turn model metadata.
      /// Step-scoped consumers should use their captured `StepContext::settings`.
      pub(crate) fn model_info(&self) -> &Arc<ModelInfo> {
+@@ -856,6 +885,34 @@ impl Session {
+             super::time_reminder::apply_persistent_defaults(&mut per_turn_config);
+         }
+         per_turn_config.service_tier = step_settings.service_tier.clone();
++        // A root turn the user chose plain Codex for works with the thread's own
++        // permissions, the same ones its colleagues get, rather than Boss main's
++        // read-only projection of them.
++        let thread_permission_profile = per_turn_config
++            .boss_main_worker_permission_profile
++            .clone()
++            .filter(|_| {
++                crate::tools::boss_direct_root_turn(
++                    &per_turn_config,
++                    &session_configuration.session_source,
++                    &model_info.slug,
++                )
++            });
++        let environments = match thread_permission_profile {
++            Some(snapshot) => {
++                if let Err(err) = per_turn_config
++                    .permissions
++                    .set_permission_profile_from_session_snapshot(snapshot.clone())
++                {
++                    tracing::warn!(
++                        %err,
++                        "could not restore the thread's permissions for a direct turn"
++                    );
++                }
++                environments.with_thread_permission_profile(&snapshot)
++            }
++            None => environments,
++        };
+         let permission_profile = environments.permission_profile_or_else(|| {
+             per_turn_config.permissions.effective_permission_profile()
+         });
 diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
 index e43fb6a2..896f981c 100644
 --- a/codex-rs/core/src/session/turn_tests.rs
@@ -6305,18 +6948,38 @@ index e43fb6a2..896f981c 100644
 +    assert!(!no_hand_off.only_handed_work_out());
 +}
 diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
-index 3b3015b6..eb830502 100644
+index 3b3015b6..07d12ce0 100644
 --- a/codex-rs/core/src/session/world_state.rs
 +++ b/codex-rs/core/src/session/world_state.rs
-@@ -8,6 +8,7 @@ use crate::context::world_state::AgentsMdState;
+@@ -6,8 +6,10 @@ use crate::connectors;
+ use crate::context::TokenBudgetContext;
+ use crate::context::world_state::AgentsMdState;
  use crate::context::world_state::AppsInstructionsState;
++use crate::context::world_state::BossMainRoleState;
  use crate::context::world_state::CollaborationModeState;
  use crate::context::world_state::CompactPermissionsState;
 +use crate::context::world_state::ConnectorInventoryState;
  use crate::context::world_state::ContextWindowGuidanceState;
  use crate::context::world_state::EnvironmentsInstructionsState;
  use crate::context::world_state::EnvironmentsState;
-@@ -223,6 +224,27 @@ impl Session {
+@@ -56,6 +58,16 @@ impl Session {
+         } else {
+             model_instructions
+         };
++        // Boss Mode: when the model picker also picks the mode, every root
++        // request is sent with the instructions of its own mode and model, so a
++        // switch needs no second copy of them in the conversation.
++        let model_instructions = if !turn_context.config.boss_direct_models.is_empty()
++            && !turn_context.session_source.is_non_root_agent()
++        {
++            String::new()
++        } else {
++            model_instructions
++        };
+         let base_instructions = self.get_prompt_base_instructions().await.text;
+         let previous_model = {
+             let state = self.state.lock().await;
+@@ -223,6 +235,29 @@ impl Session {
              } else {
                  false
              };
@@ -6324,10 +6987,12 @@ index 3b3015b6..eb830502 100644
 +        // rather than written into the base instructions. Names and descriptions
 +        // come from each connector's own metadata; nothing about which question
 +        // belongs to which source is inferred or added.
++        let direct_root_turn = crate::tools::boss_direct_turn(turn_context);
 +        let connector_inventory = if turn_context
 +            .config
 +            .features
 +            .enabled(Feature::BossConnectorInventory)
++            && !direct_root_turn
 +        {
 +            AppToolPolicyEvaluator::new(&turn_context.config.config_layer_stack)
 +                .apply_app_enabled_state(connectors::accessible_connectors_from_mcp_tools(
@@ -6344,6 +7009,18 @@ index 3b3015b6..eb830502 100644
          let apps_usage_instructions_available =
              apps_available && model_info.include_apps_usage_instructions;
          world_state.add_section(AppsInstructionsState::new(
+@@ -291,6 +326,11 @@ impl Session {
+                     .as_ref(),
+             ));
+         }
++        if let Some(role) = turn_context.config.boss_main_role.as_deref()
++            && !turn_context.session_source.is_non_root_agent()
++        {
++            world_state.add_section(BossMainRoleState::new(role, !direct_root_turn));
++        }
+         Ok(world_state)
+     }
+ }
 diff --git a/codex-rs/core/src/session_prefix.rs b/codex-rs/core/src/session_prefix.rs
 index 315ef1ca..d00eb8e3 100644
 --- a/codex-rs/core/src/session_prefix.rs
@@ -9029,10 +9706,10 @@ index 5f9d9cf8..5c11e04d 100644
              UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
          let response = session
 diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
-index 4098be8f..ae789bf3 100644
+index 4098be8f..a9dbbfde 100644
 --- a/codex-rs/core/src/tools/mod.rs
 +++ b/codex-rs/core/src/tools/mod.rs
-@@ -17,6 +17,7 @@ pub(crate) mod router;
+@@ -17,17 +17,20 @@ pub(crate) mod router;
  pub(crate) mod runtimes;
  pub(crate) mod sandboxing;
  pub(crate) mod spec_plan;
@@ -9040,7 +9717,20 @@ index 4098be8f..ae789bf3 100644
  pub(crate) mod tool_dispatch_trace;
  mod tool_namespaces_info;
  
-@@ -67,6 +68,19 @@ pub(crate) fn tool_user_shell_type(
+ use std::borrow::Cow;
+ 
++use crate::config::Config;
+ use crate::session::turn_context::TurnContext;
+ pub(crate) use approvals::ApprovalContext;
+ use codex_features::Feature;
+ use codex_protocol::exec_output::ExecToolCallOutput;
+ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::ToolMode;
++use codex_protocol::protocol::SessionSource;
+ use codex_tools::ToolName;
+ use codex_utils_output_truncation::TruncationPolicy;
+ use codex_utils_output_truncation::formatted_truncate_text;
+@@ -67,6 +70,19 @@ pub(crate) fn tool_user_shell_type(
  }
  
  pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
@@ -9048,7 +9738,7 @@ index 4098be8f..ae789bf3 100644
 +        .config
 +        .features
 +        .enabled(Feature::BossMainDecisionLayer)
-+        && !turn_context.session_source.is_non_root_agent()
++        && boss_main_turn(turn_context)
 +    {
 +        // Boss Main may still use higher-level observation tools, but a root
 +        // decision-layer turn must not reach code mode as an escape hatch for
@@ -9060,10 +9750,41 @@ index 4098be8f..ae789bf3 100644
      model_info.tool_mode.unwrap_or_else(|| {
          if turn_context.config.features.enabled(Feature::CodeModeOnly) {
              ToolMode::CodeModeOnly
-@@ -78,6 +92,46 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
+@@ -78,6 +94,77 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
      })
  }
  
++/// Returns whether a root turn on `model` is one the user chose plain Codex
++/// for: `[boss] direct_models` names the models that mean normal mode, so the
++/// model picker is the switch. Such a turn gets the stock prompt for its model,
++/// no Boss role, and the thread's own tools and permissions.
++pub(crate) fn boss_direct_root_turn(
++    config: &Config,
++    session_source: &SessionSource,
++    model: &str,
++) -> bool {
++    !session_source.is_non_root_agent()
++        && config
++            .boss_direct_models
++            .iter()
++            .any(|direct| direct == model)
++}
++
++/// [`boss_direct_root_turn`] for a turn that has already started.
++pub(crate) fn boss_direct_turn(turn_context: &TurnContext) -> bool {
++    boss_direct_root_turn(
++        &turn_context.config,
++        &turn_context.session_source,
++        &turn_context.model_info().slug,
++    )
++}
++
++/// Returns whether this turn is the root thread running as Boss main: any root
++/// turn whose model is not one of `[boss] direct_models`.
++pub(crate) fn boss_main_turn(turn_context: &TurnContext) -> bool {
++    !turn_context.session_source.is_non_root_agent() && !boss_direct_turn(turn_context)
++}
++
 +/// Returns whether this turn is the root Boss Main decision layer.
 +///
 +/// Keep this check at the execution boundary as well as in tool planning:
@@ -9074,7 +9795,7 @@ index 4098be8f..ae789bf3 100644
 +        .config
 +        .features
 +        .enabled(Feature::BossMainDecisionLayer)
-+        && !turn_context.session_source.is_non_root_agent()
++        && boss_main_turn(turn_context)
 +        && !boss_side_conversation_active(turn_context)
 +}
 +
@@ -9096,7 +9817,7 @@ index 4098be8f..ae789bf3 100644
 +        .config
 +        .features
 +        .enabled(Feature::BossMainDecisionLayer)
-+        && !turn_context.session_source.is_non_root_agent()
++        && boss_main_turn(turn_context)
 +        && turn_context.config.ephemeral
 +        && turn_context
 +            .developer_instructions
@@ -9107,7 +9828,7 @@ index 4098be8f..ae789bf3 100644
  pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
      let requested_tool_mode = requested_tool_mode(turn_context, model_info);
      if !turn_context.code_mode_available
-@@ -141,3 +195,6 @@ fn build_content_with_timeout(exec_output: &ExecToolCallOutput) -> String {
+@@ -141,3 +228,6 @@ fn build_content_with_timeout(exec_output: &ExecToolCallOutput) -> String {
          exec_output.aggregated_output.text.clone()
      }
  }
@@ -10033,7 +10754,7 @@ index 3cfee595..28328f40 100644
          }
      }
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index b603316e..1dede8de 100644
+index b603316e..5d56584b 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
 @@ -56,6 +56,7 @@ use crate::tools::handlers::McpHandler;
@@ -10096,7 +10817,7 @@ index b603316e..1dede8de 100644
      }
  }
  
-@@ -991,6 +1030,276 @@ async fn shell_family_registers_only_unified_exec_tools() {
+@@ -991,6 +1030,325 @@ async fn shell_family_registers_only_unified_exec_tools() {
      assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
  }
  
@@ -10216,6 +10937,55 @@ index b603316e..1dede8de 100644
 +    .await;
 +    worker.assert_registered_contains(&[mcp_tool_name.as_str(), dynamic_tool_name.as_str()]);
 +    worker.assert_visible_contains(&["mcp__github", "clickup"]);
++}
++
++#[tokio::test]
++async fn a_root_turn_on_a_direct_model_keeps_its_own_tools_like_normal_codex() {
++    let root = probe_with(
++        |turn| {
++            set_features(
++                turn,
++                &[
++                    Feature::BossMainDecisionLayer,
++                    Feature::MultiAgentV2,
++                    Feature::ShellTool,
++                    Feature::UnifiedExec,
++                    Feature::CodeMode,
++                ],
++            );
++            let model = turn.model_info().slug.clone();
++            Arc::make_mut(&mut turn.config).boss_direct_models = vec![model];
++            update_turn_settings_for_test(turn, |settings| {
++                Arc::make_mut(&mut settings.model_info).shell_type =
++                    ConfigShellToolType::UnifiedExec;
++                Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
++                    Some(ApplyPatchToolType::Freeform);
++            });
++        },
++        ToolPlanInputs {
++            tool_runtimes: vec![mcp_runtime(
++                "github",
++                "mcp__github",
++                "search_issues",
++                ToolExposure::Direct,
++            )],
++            dynamic_tools: vec![dynamic_tool(Some("clickup"), "list_tasks", false)],
++            ..ToolPlanInputs::default()
++        },
++    )
++    .await;
++
++    root.assert_registered_contains(&["exec_command", "write_stdin", "apply_patch"]);
++    root.assert_registered_contains(&[
++        ToolName::namespaced("mcp__github", "search_issues")
++            .to_string()
++            .as_str(),
++        ToolName::namespaced("clickup", "list_tasks")
++            .to_string()
++            .as_str(),
++    ]);
++    assert!(root.has_terminal_controls);
++    assert_eq!(root.tool_mode, ToolMode::CodeMode);
 +}
 +
 +#[tokio::test]
@@ -10373,7 +11143,7 @@ index b603316e..1dede8de 100644
  #[tokio::test]
  async fn exec_command_guidance_follows_executor_platform_and_fallbacks() {
      let opposite_host_os = if cfg!(windows) { "linux" } else { "windows" };
-@@ -1753,6 +2062,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
+@@ -1753,6 +2111,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
              RegisteredTool {
                  runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
                  exposure,
@@ -10381,7 +11151,7 @@ index b603316e..1dede8de 100644
              }
          })
          .collect();
-@@ -2049,6 +2359,7 @@ async fn strict_tool_collisions_allow_multiple_tools_in_one_namespace() {
+@@ -2049,6 +2408,7 @@ async fn strict_tool_collisions_allow_multiple_tools_in_one_namespace() {
                          McpHandler::new(undocumented_tool).expect("MCP tool spec should build"),
                      ),
                      exposure: ToolExposure::Direct,
@@ -10389,7 +11159,7 @@ index b603316e..1dede8de 100644
                  },
                  mcp_runtime("shared", "shared", "lookup", ToolExposure::Direct),
                  mcp_runtime("shared", "shared", "list", ToolExposure::Direct),
-@@ -2088,6 +2399,7 @@ async fn relaxed_tool_collisions_preserve_first_nonempty_namespace_description()
+@@ -2088,6 +2448,7 @@ async fn relaxed_tool_collisions_preserve_first_nonempty_namespace_description()
              RegisteredTool {
                  runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
                  exposure: ToolExposure::Direct,
@@ -10397,7 +11167,7 @@ index b603316e..1dede8de 100644
              }
          };
          let plan = probe_with(
-@@ -2786,6 +3098,14 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
+@@ -2786,6 +3147,14 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
          );
      }
      assert!(!properties.contains_key("agent_type"));
@@ -10412,7 +11182,7 @@ index b603316e..1dede8de 100644
  
      let v2 = probe(|turn| {
          set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
-@@ -2847,6 +3167,14 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
+@@ -2847,6 +3216,14 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
      for property in ["agent_type", "service_tier"] {
          assert!(!spawn_agent_properties.contains_key(property));
      }
@@ -10427,7 +11197,7 @@ index b603316e..1dede8de 100644
      let spawn_agent_description = spawn_agent.description.as_str();
      assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
      assert!(spawn_agent_description.contains(
-@@ -2885,7 +3213,11 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
+@@ -2885,7 +3262,11 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
      let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
          panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
      };
@@ -10440,7 +11210,7 @@ index b603316e..1dede8de 100644
          let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace.tools.iter().find(|tool| {
              matches!(
                  tool,
-@@ -2900,10 +3232,9 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
+@@ -2900,10 +3281,9 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
              .as_ref()
              .expect("tool should use object params");
          assert_eq!(
@@ -10454,7 +11224,7 @@ index b603316e..1dede8de 100644
          );
      }
  }
-@@ -2921,6 +3252,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
+@@ -2921,6 +3301,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
      assert_eq!(
          plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
          &[
@@ -10462,7 +11232,7 @@ index b603316e..1dede8de 100644
              "followup_task".to_string(),
              "interrupt_agent".to_string(),
              "list_agents".to_string(),
-@@ -3409,3 +3741,157 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+@@ -3409,3 +3790,157 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
      bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
      bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
  }
@@ -12701,10 +13471,10 @@ index f5a4648f..b17cbd3d 100644
                  {"type": "encrypted_content", "encrypted_content": "review this"}
              ]
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index ca0a84bf..5a236517 100644
+index ca0a84bf..10bef767 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
-@@ -264,6 +264,12 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+@@ -264,6 +264,14 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
          agent_max_threads: Some(6),
          agent_default_subagent_model: None,
          agent_default_subagent_reasoning_effort: None,
@@ -12713,6 +13483,8 @@ index ca0a84bf..5a236517 100644
 +        boss_observation_rounds_per_turn: 2,
 +        boss_recent_evidence_tokens: 4_000,
 +        boss_park_main_while_colleagues_work: true,
++        boss_direct_models: Vec::new(),
++        boss_main_role: None,
 +        boss_worker_dropped_stock_sections: Vec::new(),
          agent_interrupt_message_enabled: false,
          agent_max_depth: 1,

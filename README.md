@@ -72,6 +72,9 @@ layered on rather than substituted.
 builds a release CLI, and stages it next to a link to the stock code-mode host.
 `bin/codex-boss` launches Codex Desktop with `CODEX_CLI_PATH` and
 `CODEX_CONFIG_PROFILE` pointed at it. `bin/codex-normal` launches stock.
+Inside Boss Mode the model picker also picks the mode, turn by turn: a model
+listed in `[boss] direct_models` (Luna in the example profile) runs the thread
+as plain Codex, and any other model runs it as Boss main.
 
 Requirements: macOS, Codex Desktop installed, `git`, and
 [rustup](https://rustup.rs).

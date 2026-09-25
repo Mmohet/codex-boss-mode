@@ -122,6 +122,12 @@ recent_evidence_tokens = 4000
 # colleague is still working keeps waiting. Measured 2026-09-20..24: those two
 # re-samples were about a quarter of Boss main's usage.
 park_main_while_colleagues_work = true
+# Models that run the root as plain Codex instead of Boss main: the stock prompt
+# for that model, no Boss role, and the thread's own tools and permissions. The
+# model picker is the switch, turn by turn: pick one of these for normal mode,
+# anything else for Boss main. A model switch already starts a new prompt cache,
+# so changing the prompt with it costs nothing more.
+direct_models = ["gpt-6-luna"]
 # Stock-prompt sections a worker does not receive, by exact heading.
 worker_dropped_stock_sections = [
   "# Autonomy and persistence",
@@ -235,6 +241,10 @@ Side conversation. Everything above is the main conversation, carried over for r
 "connectors.intro" = '''
 
 Sources you can reach in this session. Each description is the one the source provides for itself.
+'''
+"main_role.set_aside" = '''
+
+The user has chosen to work with you directly from here on, so the lead role described earlier is set aside. Do the work yourself with your own tools, as a normal Codex session would. Colleagues from earlier are still there if the user asks for them.
 '''
 
 [features]
