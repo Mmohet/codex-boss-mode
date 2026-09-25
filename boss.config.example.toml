@@ -115,6 +115,13 @@ observation_rounds_per_turn = 2
 # Newest technical tool output, in estimated tokens, that Boss main keeps
 # verbatim; older output becomes a placeholder that says how to reopen it.
 recent_evidence_tokens = 4000
+# Keep Boss main off the model while colleagues work. After a step whose only
+# tool calls handed work out (spawn_agent / followup_task / send_message), the
+# runtime waits for the next colleague message or user input instead of
+# sampling again just to call wait_agent; a wait_agent that expires while a
+# colleague is still working keeps waiting. Measured 2026-09-20..24: those two
+# re-samples were about a quarter of Boss main's usage.
+park_main_while_colleagues_work = true
 # Stock-prompt sections a worker does not receive, by exact heading.
 worker_dropped_stock_sections = [
   "# Autonomy and persistence",

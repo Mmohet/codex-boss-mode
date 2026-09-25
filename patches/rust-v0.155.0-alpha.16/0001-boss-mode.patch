@@ -2177,7 +2177,7 @@ index 25326c4d..b77c3ea6 100644
  const CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
  const CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index d5572f3c..0d49ba8a 100644
+index d5572f3c..e19e7ea7 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -459,6 +459,10 @@ pub struct ConfigToml {
@@ -2191,7 +2191,7 @@ index d5572f3c..0d49ba8a 100644
      /// Goal-related settings.
      pub goals: Option<GoalsToml>,
  
-@@ -684,6 +688,26 @@ pub struct GoalsToml {
+@@ -684,6 +688,31 @@ pub struct GoalsToml {
      pub max_goal_token_budget: Option<NonZeroU64>,
  }
  
@@ -2206,6 +2206,11 @@ index d5572f3c..0d49ba8a 100644
 +    /// Newest technical tool output, in estimated tokens, that Boss main keeps
 +    /// verbatim before older output is replaced by a placeholder. Defaults to 4000.
 +    pub recent_evidence_tokens: Option<i64>,
++    /// Keep Boss main off the model while its colleagues work: after a step
++    /// that only handed work out, and after a wait that expired with a
++    /// colleague still working, the runtime waits for the next colleague
++    /// message or user input instead of sampling again. Defaults to true.
++    pub park_main_while_colleagues_work: Option<bool>,
 +    /// Headings of the stock-prompt sections a Boss worker does not receive,
 +    /// written exactly as they appear (for example `# Autonomy and persistence`).
 +    pub worker_dropped_stock_sections: Option<Vec<String>>,
@@ -2218,7 +2223,7 @@ index d5572f3c..0d49ba8a 100644
  #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
  #[schemars(deny_unknown_fields)]
  pub struct AgentsToml {
-@@ -701,6 +725,15 @@ pub struct AgentsToml {
+@@ -701,6 +730,15 @@ pub struct AgentsToml {
      pub default_subagent_model: Option<String>,
      /// Default reasoning effort for spawned subagents when the spawn call does not select one.
      pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
@@ -2347,7 +2352,7 @@ index 57b5daff..df4ad11e 100644
  
  #[derive(Debug, Clone, PartialEq)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index e53a95e2..3a24c81f 100644
+index e53a95e2..21603cd9 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -36,6 +36,13 @@
@@ -2378,7 +2383,7 @@ index e53a95e2..3a24c81f 100644
          }
        },
        "type": "object"
-@@ -459,6 +473,39 @@
+@@ -459,6 +473,43 @@
        ],
        "type": "object"
      },
@@ -2392,6 +2397,10 @@ index e53a95e2..3a24c81f 100644
 +          "maximum": 20.0,
 +          "minimum": 0.0,
 +          "type": "integer"
++        },
++        "park_main_while_colleagues_work": {
++          "description": "Keep Boss main off the model while its colleagues work: after a step that only handed work out, and after a wait that expired with a colleague still working, the runtime waits for the next colleague message or user input instead of sampling again. Defaults to true.",
++          "type": "boolean"
 +        },
 +        "recent_evidence_tokens": {
 +          "description": "Newest technical tool output, in estimated tokens, that Boss main keeps verbatim before older output is replaced by a placeholder. Defaults to 4000.",
@@ -2418,7 +2427,7 @@ index e53a95e2..3a24c81f 100644
      "BrowserUseConfigToml": {
        "additionalProperties": false,
        "properties": {
-@@ -688,6 +735,21 @@
+@@ -688,6 +739,21 @@
              "bedrock_setup_wizard": {
                "type": "boolean"
              },
@@ -2440,7 +2449,7 @@ index e53a95e2..3a24c81f 100644
              "browser_use": {
                "type": "boolean"
              },
-@@ -1030,6 +1092,9 @@
+@@ -1030,6 +1096,9 @@
              "step_model_switching": {
                "type": "boolean"
              },
@@ -2450,7 +2459,7 @@ index e53a95e2..3a24c81f 100644
              "telepathy": {
                "type": "boolean"
              },
-@@ -6207,6 +6272,14 @@
+@@ -6207,6 +6276,14 @@
        "minimum": 0.0,
        "type": "integer"
      },
@@ -2465,7 +2474,7 @@ index e53a95e2..3a24c81f 100644
      "browser_use": {
        "$ref": "#/definitions/BrowserUseConfigToml"
      },
-@@ -6342,6 +6415,21 @@
+@@ -6342,6 +6419,21 @@
          "bedrock_setup_wizard": {
            "type": "boolean"
          },
@@ -2487,7 +2496,7 @@ index e53a95e2..3a24c81f 100644
          "browser_use": {
            "type": "boolean"
          },
-@@ -6684,6 +6772,9 @@
+@@ -6684,6 +6776,9 @@
          "step_model_switching": {
            "type": "boolean"
          },
@@ -2607,7 +2616,7 @@ index ca2f7d91..cdcd3b64 100644
          return Ok(());
      }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 33bd450b..079e0692 100644
+index 33bd450b..2b47c855 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
 @@ -40,6 +40,7 @@ use codex_protocol::items::TurnItem;
@@ -2868,7 +2877,7 @@ index 33bd450b..079e0692 100644
              });
          }
  
-@@ -608,22 +726,131 @@ impl AgentControl {
+@@ -608,22 +726,157 @@ impl AgentControl {
              {
                  continue;
              }
@@ -2878,7 +2887,7 @@ index 33bd450b..079e0692 100644
 +            {
 +                continue;
 +            }
-+
+ 
 +            let agent_name = metadata
 +                .agent_path
 +                .as_ref()
@@ -2909,7 +2918,7 @@ index 33bd450b..079e0692 100644
 +
 +        Ok(agents)
 +    }
- 
++
 +    /// Reports how full each open colleague's context is, for callers that are
 +    /// already talking to the roster and should not have to ask separately.
 +    ///
@@ -2964,6 +2973,32 @@ index 33bd450b..079e0692 100644
 +    }
  
 -        Ok(agents)
++    /// Whether any open colleague is starting up or in the middle of a turn.
++    ///
++    /// Boss main only pays to look when looking can change something, and while a
++    /// colleague is still working the only thing that can is its next message or
++    /// the user. Once nobody is working, waiting longer can bring nothing.
++    pub(crate) async fn any_colleague_working(&self) -> bool {
++        let Ok(state) = self.upgrade() else {
++            return false;
++        };
++        for metadata in self.state.live_agents() {
++            let Some(thread_id) = metadata.agent_id else {
++                continue;
++            };
++            let Ok(thread) = state.get_thread(thread_id).await else {
++                continue;
++            };
++            if matches!(
++                thread.agent_status().await,
++                AgentStatus::PendingInit | AgentStatus::Running
++            ) {
++                return true;
++            }
++        }
++        false
++    }
++
 +    /// Compacts every idle colleague whose context is at least `threshold_percent`
 +    /// full, returning the ones it asked to compact.
 +    ///
@@ -3005,7 +3040,7 @@ index 33bd450b..079e0692 100644
      }
  
      /// Starts a detached watcher for sub-agents spawned from another thread.
-@@ -833,10 +1060,45 @@ impl AgentControl {
+@@ -833,10 +1086,45 @@ impl AgentControl {
          &self,
          parent_thread_id: ThreadId,
      ) -> CodexResult<Vec<(ThreadId, AgentMetadata)>> {
@@ -3055,7 +3090,7 @@ index 33bd450b..079e0692 100644
      }
  
      async fn live_thread_spawn_children(
-@@ -909,6 +1171,20 @@ impl AgentControl {
+@@ -909,6 +1197,20 @@ impl AgentControl {
          &self,
          root_thread_id: ThreadId,
      ) -> CodexResult<Vec<ThreadId>> {
@@ -3478,7 +3513,7 @@ index 4e8d9bff..1dd8c3cc 100644
                      && matches!(
                          &*item,
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index c2bd787c..a8fc6236 100644
+index c2bd787c..3c118e65 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -935,6 +935,22 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
@@ -3504,7 +3539,7 @@ index c2bd787c..a8fc6236 100644
      if matches!(route, V2ReloadRoute::NestedParent) {
          let reloaded_turn = reloaded_child.session.new_default_turn().await;
          assert_eq!(
-@@ -3624,6 +3640,157 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
+@@ -3624,6 +3640,180 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
      ));
  }
  
@@ -3550,6 +3585,29 @@ index c2bd787c..a8fc6236 100644
 +        duration_ms: None,
 +        time_to_first_token_ms: None,
 +    })
++}
++
++#[tokio::test]
++async fn a_colleague_counts_as_working_until_its_turn_completes() {
++    let harness = AgentControlHarness::new().await;
++    let mut config = harness.config.clone();
++    let _ = config.features.enable(Feature::MultiAgentV2);
++    let root = harness
++        .manager
++        .start_thread(StartThreadOptions::new(config.clone()))
++        .await
++        .expect("root thread should start");
++    assert!(!harness.control.any_colleague_working().await);
++
++    let (_, worker) = spawn_v2_worker(&harness, &config, root.thread_id, "worker").await;
++    assert!(harness.control.any_colleague_working().await);
++
++    let turn = worker.session.new_default_turn().await;
++    worker
++        .session
++        .send_event(turn.as_ref(), turn_complete(turn.as_ref(), Some("done")))
++        .await;
++    assert!(!harness.control.any_colleague_working().await);
 +}
 +
 +#[tokio::test]
@@ -3756,7 +3814,7 @@ index 00000000..a8f3a293
 +    assert_eq!(text("test.boss_text.untouched", "built in"), "built in");
 +}
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 7be3235f..b5a4208e 100644
+index 7be3235f..82eca6b9 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -2054,6 +2054,10 @@ respect_system_proxy = true
@@ -3895,7 +3953,7 @@ index 7be3235f..b5a4208e 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9348,6 +9463,104 @@ job_max_runtime_seconds = 900
+@@ -9348,6 +9463,108 @@ job_max_runtime_seconds = 900
      );
  }
  
@@ -3908,6 +3966,7 @@ index 7be3235f..b5a4208e 100644
 +            boss: Some(codex_config::config_toml::BossToml {
 +                observation_rounds_per_turn: Some(3),
 +                recent_evidence_tokens: Some(9_000),
++                park_main_while_colleagues_work: Some(false),
 +                worker_dropped_stock_sections: Some(vec!["# Personality".to_string()]),
 +                text: None,
 +            }),
@@ -3921,9 +3980,10 @@ index 7be3235f..b5a4208e 100644
 +        (
 +            configured.boss_observation_rounds_per_turn,
 +            configured.boss_recent_evidence_tokens,
++            configured.boss_park_main_while_colleagues_work,
 +            configured.boss_worker_dropped_stock_sections,
 +        ),
-+        (3, 9_000, vec!["# Personality".to_string()])
++        (3, 9_000, false, vec!["# Personality".to_string()])
 +    );
 +
 +    let defaults = Config::load_from_base_config_with_overrides(
@@ -3936,11 +3996,13 @@ index 7be3235f..b5a4208e 100644
 +        (
 +            defaults.boss_observation_rounds_per_turn,
 +            defaults.boss_recent_evidence_tokens,
++            defaults.boss_park_main_while_colleagues_work,
 +            defaults.boss_worker_dropped_stock_sections.len(),
 +        ),
 +        (
 +            DEFAULT_BOSS_OBSERVATION_ROUNDS_PER_TURN,
 +            DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS,
++            true,
 +            DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS.len(),
 +        )
 +    );
@@ -4000,7 +4062,7 @@ index 7be3235f..b5a4208e 100644
  #[tokio::test]
  async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
      let codex_home = TempDir::new()?;
-@@ -9357,6 +9570,8 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+@@ -9357,6 +9574,8 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
              max_depth: Some(2),
              default_subagent_model: Some("gpt-5.6-terra".to_string()),
              default_subagent_reasoning_effort: Some(ReasoningEffort::High),
@@ -4009,7 +4071,7 @@ index 7be3235f..b5a4208e 100644
              interrupt_message: Some(false),
              ..Default::default()
          }),
-@@ -9421,6 +9636,8 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
+@@ -9421,6 +9640,8 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4018,7 +4080,7 @@ index 7be3235f..b5a4208e 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9467,6 +9684,8 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
+@@ -9467,6 +9688,8 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4027,7 +4089,7 @@ index 7be3235f..b5a4208e 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9507,6 +9726,8 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
+@@ -9507,6 +9730,8 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4036,7 +4098,7 @@ index 7be3235f..b5a4208e 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -9547,6 +9768,8 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
+@@ -9547,6 +9772,8 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
              max_depth: None,
              default_subagent_model: None,
              default_subagent_reasoning_effort: None,
@@ -4045,7 +4107,7 @@ index 7be3235f..b5a4208e 100644
              job_max_runtime_seconds: None,
              interrupt_message: None,
              roles: BTreeMap::from([(
-@@ -11836,7 +12059,7 @@ max_concurrent_threads_per_session = 17
+@@ -11836,7 +12063,7 @@ max_concurrent_threads_per_session = 17
      .expect("multi-agent v2 config should parse");
  
      let config = resolve_multi_agent_v2_config(&config_toml);
@@ -4054,7 +4116,7 @@ index 7be3235f..b5a4208e 100644
      let messages = ResolvedModelMessages::bundled().multi_agent();
      assert!(config.wait_agent_enabled);
      for wait_agent_enabled in [true, false] {
-@@ -11849,7 +12072,7 @@ max_concurrent_threads_per_session = 17
+@@ -11849,7 +12076,7 @@ max_concurrent_threads_per_session = 17
              let hint = hint.expect("default usage hints should be present").body();
              assert!(hint.contains(concurrency_guidance));
              assert_eq!(
@@ -4063,7 +4125,7 @@ index 7be3235f..b5a4208e 100644
                  wait_agent_enabled
              );
          }
-@@ -11937,12 +12160,7 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+@@ -11937,12 +12164,7 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
          let model_override_guidance = hint
              .strip_prefix(hint_without_model_overrides.as_str())
              .expect("model-override guidance should extend the base usage hint");
@@ -4077,7 +4139,7 @@ index 7be3235f..b5a4208e 100644
              assert!(
                  model_override_guidance.contains(required_fragment),
                  "model-override guidance should contain {required_fragment}"
-@@ -13113,3 +13331,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
+@@ -13113,3 +13335,102 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
  
      Ok(())
  }
@@ -4181,7 +4243,7 @@ index 7be3235f..b5a4208e 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 2c17d687..390b2f54 100644
+index 2c17d687..388899e3 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -646,6 +646,16 @@ pub struct Config {
@@ -4201,7 +4263,7 @@ index 2c17d687..390b2f54 100644
      /// Whether config explicitly selected named permissions profiles instead
      /// of the legacy `sandbox_mode` syntax.
      pub explicit_permission_profile_mode: bool,
-@@ -898,6 +908,22 @@ pub struct Config {
+@@ -898,6 +908,25 @@ pub struct Config {
      /// Default reasoning effort for spawned subagents when the spawn call does not select one.
      pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
  
@@ -4218,13 +4280,16 @@ index 2c17d687..390b2f54 100644
 +    /// Newest technical output Boss main keeps verbatim, in estimated tokens.
 +    pub boss_recent_evidence_tokens: i64,
 +
++    /// Whether Boss main waits off-model while colleagues work; see `[boss]`.
++    pub boss_park_main_while_colleagues_work: bool,
++
 +    /// Stock-prompt section headings a Boss worker does not receive.
 +    pub boss_worker_dropped_stock_sections: Vec<String>,
 +
      /// Whether to record a model-visible message when an agent turn is interrupted.
      pub agent_interrupt_message_enabled: bool,
  
-@@ -1519,11 +1545,47 @@ impl ConfigBuilder {
+@@ -1519,11 +1548,47 @@ impl ConfigBuilder {
      }
  }
  
@@ -4272,7 +4337,7 @@ index 2c17d687..390b2f54 100644
      /// Resolves the configured, reviewer-catalog, or bundled Guardian policy.
      pub fn resolve_guardian_policy<'a>(
          &'a self,
-@@ -1627,6 +1689,7 @@ impl Config {
+@@ -1627,6 +1692,7 @@ impl Config {
                      Some(BaseInstructionsProvenance::Model { .. })
                  )
              }),
@@ -4280,7 +4345,7 @@ index 2c17d687..390b2f54 100644
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
          }
-@@ -1644,7 +1707,10 @@ impl Config {
+@@ -1644,7 +1710,10 @@ impl Config {
          } else {
              OutboundProxyPolicy::ReqwestDefault
          };
@@ -4292,7 +4357,7 @@ index 2c17d687..390b2f54 100644
          if self.features.enabled(Feature::Psp) {
              factory.with_chatgpt_cookies([HeaderValue::from_static("oai-chat-psp=true")])
          } else {
-@@ -2973,17 +3039,8 @@ pub fn resolve_bootstrap_respect_system_proxy(
+@@ -2973,17 +3042,8 @@ pub fn resolve_bootstrap_respect_system_proxy(
      cfg: &ConfigToml,
      feature_requirements: Option<&Sourced<FeatureRequirementsToml>>,
  ) -> std::io::Result<bool> {
@@ -4312,7 +4377,7 @@ index 2c17d687..390b2f54 100644
  }
  
  /// Resolves auth route settings for the initial cloud-config bootstrap.
-@@ -3000,14 +3057,28 @@ pub fn resolve_bootstrap_http_client_factory(
+@@ -3000,14 +3060,28 @@ pub fn resolve_bootstrap_http_client_factory(
      cfg: &ConfigToml,
      feature_requirements: Option<&Sourced<FeatureRequirementsToml>>,
  ) -> std::io::Result<HttpClientFactory> {
@@ -4349,7 +4414,7 @@ index 2c17d687..390b2f54 100644
  }
  
  pub(crate) fn resolve_web_search_mode_for_turn(
-@@ -3799,6 +3870,32 @@ impl Config {
+@@ -3799,6 +3873,34 @@ impl Config {
              .agents
              .as_ref()
              .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
@@ -4372,6 +4437,8 @@ index 2c17d687..390b2f54 100644
 +        let boss_recent_evidence_tokens = boss
 +            .recent_evidence_tokens
 +            .unwrap_or(DEFAULT_BOSS_RECENT_EVIDENCE_TOKENS);
++        let boss_park_main_while_colleagues_work =
++            boss.park_main_while_colleagues_work.unwrap_or(true);
 +        let boss_worker_dropped_stock_sections =
 +            boss.worker_dropped_stock_sections.unwrap_or_else(|| {
 +                DEFAULT_BOSS_WORKER_DROPPED_STOCK_SECTIONS
@@ -4382,7 +4449,7 @@ index 2c17d687..390b2f54 100644
          let agent_interrupt_message_enabled = cfg
              .agents
              .as_ref()
-@@ -3902,7 +3999,29 @@ impl Config {
+@@ -3902,7 +4004,29 @@ impl Config {
          let base_instructions_provenance = base_instructions
              .as_ref()
              .map(|_| BaseInstructionsProvenance::Custom);
@@ -4413,7 +4480,7 @@ index 2c17d687..390b2f54 100644
          let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
          let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
          let include_collaboration_mode_instructions =
-@@ -4179,6 +4298,8 @@ impl Config {
+@@ -4179,6 +4303,8 @@ impl Config {
                  windows_sandbox_type,
                  windows_sandbox_private_desktop,
              },
@@ -4422,7 +4489,7 @@ index 2c17d687..390b2f54 100644
              explicit_permission_profile_mode,
              custom_permission_profiles,
              approvals_reviewer: constrained_approvals_reviewer.value(),
-@@ -4241,6 +4362,11 @@ impl Config {
+@@ -4241,6 +4367,12 @@ impl Config {
              agent_max_threads,
              agent_default_subagent_model,
              agent_default_subagent_reasoning_effort,
@@ -4430,6 +4497,7 @@ index 2c17d687..390b2f54 100644
 +            agent_compact_idle_colleagues_above_percent,
 +            boss_observation_rounds_per_turn,
 +            boss_recent_evidence_tokens,
++            boss_park_main_while_colleagues_work,
 +            boss_worker_dropped_stock_sections,
              agent_max_depth,
              agent_roles,
@@ -5879,7 +5947,7 @@ index 723f85a8..1cd3fc69 100644
  
      let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 24e59a33..530e4eb2 100644
+index 24e59a33..bd30b571 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -40,6 +40,7 @@ use crate::session::session::Session;
@@ -5890,7 +5958,38 @@ index 24e59a33..530e4eb2 100644
  use crate::stream_events_utils::HandleOutputCtx;
  use crate::stream_events_utils::InFlightFuture;
  use crate::stream_events_utils::TurnItemContributorPolicy;
-@@ -1523,11 +1524,21 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+@@ -127,6 +128,7 @@ use codex_utils_stream_parser::extract_proposed_plan_text;
+ use codex_utils_stream_parser::strip_citations;
+ use futures::prelude::*;
+ use futures::stream::FuturesOrdered;
++use std::time::Duration;
+ use tokio_util::sync::CancellationToken;
+ use tracing::Instrument;
+ use tracing::error;
+@@ -540,6 +542,7 @@ pub(crate) async fn run_turn(
+                 let SamplingRequestResult {
+                     needs_follow_up: model_needs_follow_up,
+                     last_agent_message: sampling_request_last_agent_message,
++                    only_handed_work_out,
+                 } = sampling_request_output;
+                 if model_needs_follow_up {
+                     sess.input_queue
+@@ -703,6 +706,14 @@ pub(crate) async fn run_turn(
+                     }
+                     break;
+                 }
++                if only_handed_work_out
++                    && !has_pending_input
++                    && turn_context.config.boss_park_main_while_colleagues_work
++                    && crate::tools::boss_main_execution_isolation_active(&turn_context)
++                {
++                    park_boss_main_while_colleagues_work(&sess, &turn_context, &cancellation_token)
++                        .await;
++                }
+                 continue;
+             }
+             Err(err)
+@@ -1523,11 +1534,21 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
  
  #[instrument(level = "trace", skip_all)]
  pub(crate) fn build_prompt(
@@ -5913,7 +6012,110 @@ index 24e59a33..530e4eb2 100644
      Prompt {
          input,
          tools: step_context.tool_router.model_visible_specs(),
-@@ -2467,6 +2478,11 @@ async fn try_run_sampling_request(
+@@ -1800,6 +1821,88 @@ pub(crate) async fn built_tools(
+ struct SamplingRequestResult {
+     needs_follow_up: bool,
+     last_agent_message: Option<String>,
++    /// The step's only tool calls handed work to colleagues, and all succeeded.
++    only_handed_work_out: bool,
++}
++
++/// What one sampling step asked tools to do, as far as Boss main parking cares.
++///
++/// A step that only handed work to colleagues has nothing to learn from its
++/// own tool outputs: they acknowledge the hand-off. Sampling again right away
++/// only buys a full-context read that decides to wait. Any other tool call, or
++/// a hand-off that failed, is something the model has to see.
++#[derive(Debug, Default)]
++struct HandOffStep {
++    handed_out: bool,
++    needs_model: bool,
++}
++
++impl HandOffStep {
++    fn observe_call(&mut self, item: &ResponseItem) {
++        match item {
++            ResponseItem::FunctionCall { name, .. } if is_colleague_hand_off_tool(name) => {
++                self.handed_out = true;
++            }
++            ResponseItem::FunctionCall { .. }
++            | ResponseItem::CustomToolCall { .. }
++            | ResponseItem::LocalShellCall { .. }
++            | ResponseItem::ToolSearchCall { .. }
++            | ResponseItem::WebSearchCall { .. }
++            | ResponseItem::ImageGenerationCall { .. } => self.needs_model = true,
++            _ => {}
++        }
++    }
++
++    fn observe_output(&mut self, item: &ResponseItem) {
++        if let ResponseItem::FunctionCallOutput { output, .. }
++        | ResponseItem::CustomToolCallOutput { output, .. } = item
++            && output.success == Some(false)
++        {
++            self.needs_model = true;
++        }
++    }
++
++    fn only_handed_work_out(&self) -> bool {
++        self.handed_out && !self.needs_model
++    }
++}
++
++fn is_colleague_hand_off_tool(name: &str) -> bool {
++    matches!(name, "spawn_agent" | "followup_task" | "send_message")
++}
++
++/// Keeps Boss main off the model until a colleague speaks or the user steers.
++///
++/// Called after a step that only handed work out. Returns immediately when
++/// something is already waiting or nobody is working, and rechecks now and
++/// then in case a colleague stops without a message.
++pub(crate) async fn park_boss_main_while_colleagues_work(
++    sess: &Session,
++    turn_context: &TurnContext,
++    cancellation_token: &CancellationToken,
++) {
++    const RECHECK: Duration = Duration::from_secs(30);
++    let turn_state = sess
++        .input_queue
++        .turn_state_for_sub_id(&sess.active_turn, &turn_context.sub_id)
++        .await;
++    let (mut activity_rx, pending_activity) = sess
++        .input_queue
++        .subscribe_activity(turn_state.as_deref())
++        .await;
++    if pending_activity.is_some() {
++        return;
++    }
++    while sess.services.agent_control.any_colleague_working().await {
++        tokio::select! {
++            _ = cancellation_token.cancelled() => return,
++            changed = tokio::time::timeout(RECHECK, activity_rx.changed()) => {
++                if changed.is_ok() {
++                    return;
++                }
++            }
++        }
++    }
+ }
+ 
+ /// Ephemeral per-response state for streaming a single proposed plan.
+@@ -2369,11 +2472,13 @@ async fn drain_in_flight(
+     in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
+     sess: Arc<Session>,
+     step_context: &StepContext,
++    hand_off_step: &mut HandOffStep,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     while let Some(res) = in_flight.next().await {
+         match res {
+             Ok(envelope) => {
++                hand_off_step.observe_output(&envelope.item);
+                 mark_thread_memory_mode_polluted_if_external_context(
+                     sess.as_ref(),
+                     turn_context.as_ref(),
+@@ -2467,7 +2572,13 @@ async fn try_run_sampling_request(
          .instrument(trace_span!("stream_request"))
          .or_cancel(&cancellation_token)
          .await??;
@@ -5923,12 +6125,15 @@ index 24e59a33..530e4eb2 100644
 +            .boss_main_observation_calls(),
 +    );
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
++    let mut hand_off_step = HandOffStep::default();
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
-@@ -2549,6 +2565,13 @@ async fn try_run_sampling_request(
+     let mut active_item: Option<TurnItem> = None;
+@@ -2549,6 +2660,14 @@ async fn try_run_sampling_request(
              }
              ResponseEvent::OutputItemDone(mut item) => {
                  assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
++                hand_off_step.observe_call(&item);
 +                if last_assistant_message_from_item(&item, plan_mode).is_some()
 +                    && crate::tools::boss_main_execution_isolation_active(&turn_context)
 +                {
@@ -5939,7 +6144,7 @@ index 24e59a33..530e4eb2 100644
                  if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                      let call_id = match &item {
                          ResponseItem::FunctionCall { call_id, .. }
-@@ -2611,6 +2634,7 @@ async fn try_run_sampling_request(
+@@ -2611,6 +2730,7 @@ async fn try_run_sampling_request(
                      turn_store: Arc::clone(&turn_store),
                      tool_runtime: tool_runtime.clone(),
                      cancellation_token: cancellation_token.child_token(),
@@ -5947,6 +6152,41 @@ index 24e59a33..530e4eb2 100644
                  };
  
                  let preempt_for_mailbox_mail = match &item {
+@@ -2656,6 +2776,7 @@ async fn try_run_sampling_request(
+                     break Ok(SamplingRequestResult {
+                         needs_follow_up: true,
+                         last_agent_message,
++                        only_handed_work_out: false,
+                     });
+                 }
+             }
+@@ -2840,6 +2961,7 @@ async fn try_run_sampling_request(
+                 break Ok(SamplingRequestResult {
+                     needs_follow_up,
+                     last_agent_message,
++                    only_handed_work_out: false,
+                 });
+             }
+             ResponseEvent::OutputTextDelta(delta) => {
+@@ -3006,7 +3128,17 @@ async fn try_run_sampling_request(
+     } else {
+         Some(turn_context.turn_timing_state.begin_tool_blocking())
+     };
+-    drain_in_flight(&mut in_flight, sess.clone(), &step_context).await?;
++    drain_in_flight(
++        &mut in_flight,
++        sess.clone(),
++        &step_context,
++        &mut hand_off_step,
++    )
++    .await?;
++    let outcome = outcome.map(|mut result| {
++        result.only_handed_work_out = hand_off_step.only_handed_work_out();
++        result
++    });
+     drop(tool_blocking_timing_guard);
+ 
+     if should_emit_token_count {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
 index ae88a809..ce378dcf 100644
 --- a/codex-rs/core/src/session/turn_context.rs
@@ -6001,6 +6241,69 @@ index ae88a809..ce378dcf 100644
      /// Legacy: returns the frozen initial-turn model metadata.
      /// Step-scoped consumers should use their captured `StepContext::settings`.
      pub(crate) fn model_info(&self) -> &Arc<ModelInfo> {
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index e43fb6a2..896f981c 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -108,3 +108,58 @@ fn realtime_user_verification_notice_excludes_request_payload() {
+         )),
+     );
+ }
++
++fn tool_call(name: &str) -> ResponseItem {
++    ResponseItem::FunctionCall {
++        id: None,
++        name: name.to_string(),
++        namespace: Some("boss".to_string()),
++        arguments: "{}".to_string(),
++        encrypted_function_args: None,
++        call_id: format!("call-{name}"),
++        internal_chat_message_metadata_passthrough: None,
++    }
++}
++
++fn tool_output(success: Option<bool>) -> ResponseItem {
++    ResponseItem::FunctionCallOutput {
++        id: None,
++        call_id: Some("call".to_string()),
++        name: None,
++        namespace: None,
++        output: codex_protocol::models::FunctionCallOutputPayload {
++            body: codex_protocol::models::FunctionCallOutputBody::Text("{}".to_string()),
++            success,
++        },
++        internal_chat_message_metadata_passthrough: None,
++    }
++}
++
++#[test]
++fn a_step_that_only_hands_work_out_does_not_need_the_model_again() {
++    let mut step = HandOffStep::default();
++    step.observe_call(&assistant_output_text("Asking a colleague."));
++    step.observe_call(&tool_call("spawn_agent"));
++    step.observe_call(&tool_call("followup_task"));
++    step.observe_call(&tool_call("send_message"));
++    step.observe_output(&tool_output(Some(true)));
++    step.observe_output(&tool_output(None));
++    assert!(step.only_handed_work_out());
++}
++
++#[test]
++fn a_step_with_any_other_call_a_failed_hand_off_or_no_hand_off_needs_the_model() {
++    let mut with_wait = HandOffStep::default();
++    with_wait.observe_call(&tool_call("spawn_agent"));
++    with_wait.observe_call(&tool_call("wait_agent"));
++    assert!(!with_wait.only_handed_work_out());
++
++    let mut failed = HandOffStep::default();
++    failed.observe_call(&tool_call("spawn_agent"));
++    failed.observe_output(&tool_output(Some(false)));
++    assert!(!failed.only_handed_work_out());
++
++    let mut no_hand_off = HandOffStep::default();
++    no_hand_off.observe_call(&assistant_output_text("Done."));
++    assert!(!no_hand_off.only_handed_work_out());
++}
 diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
 index 3b3015b6..eb830502 100644
 --- a/codex-rs/core/src/session/world_state.rs
@@ -7406,7 +7709,7 @@ index 888a1137..093e0e00 100644
              "pending_init",
              "running",
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 86d80ee7..e97a6fdb 100644
+index 86d80ee7..38fce068 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -216,6 +216,7 @@ struct ListAgentsResult {
@@ -7726,6 +8029,240 @@ index 86d80ee7..e97a6fdb 100644
  #[tokio::test]
  async fn build_agent_resume_config_clears_base_instructions() {
      let (_session, mut turn) = make_session_and_context().await;
+@@ -4597,3 +4678,233 @@ async fn build_agent_resume_config_clears_base_instructions() {
+         .expect("approval policy set");
+     assert_eq!(config, expected);
+ }
++
++#[tokio::test]
++async fn boss_main_wait_holds_past_its_timeout_while_a_colleague_works() {
++    let (mut session, mut turn) = make_session_and_context().await;
++    let manager = thread_manager();
++    let root = manager
++        .start_thread(StartThreadOptions::new((*turn.config).clone()))
++        .await
++        .expect("root thread should start");
++    session.services.agent_control = manager.agent_control();
++    session.thread_id = root.thread_id;
++    let mut config = (*turn.config).clone();
++    for feature in [Feature::MultiAgentV2, Feature::BossMainDecisionLayer] {
++        config
++            .features
++            .enable(feature)
++            .expect("test config should allow feature update");
++    }
++    config.multi_agent_v2.min_wait_timeout_ms = 1;
++    config.multi_agent_v2.max_wait_timeout_ms = 1_000;
++    config.multi_agent_v2.default_wait_timeout_ms = 20;
++    set_turn_config(&mut turn, config);
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++
++    SpawnAgentHandlerV2::default()
++        .handle(invocation(
++            session.clone(),
++            turn.clone(),
++            "spawn_agent",
++            function_payload(json!({
++                "message": "boot worker",
++                "task_name": "worker"
++            })),
++        ))
++        .await
++        .expect("spawn worker");
++    let agent_id = session
++        .services
++        .agent_control
++        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
++        .await
++        .expect("relative path should resolve");
++    let worker_path = session
++        .services
++        .agent_control
++        .get_agent_metadata(agent_id)
++        .expect("worker metadata")
++        .agent_path
++        .expect("worker path");
++    assert!(session.services.agent_control.any_colleague_working().await);
++
++    let wait_task = tokio::spawn({
++        let session = session.clone();
++        let turn = turn.clone();
++        async move {
++            WaitAgentHandlerV2::default()
++                .handle(invocation(
++                    session,
++                    turn,
++                    "wait_agent",
++                    function_payload(json!({})),
++                ))
++                .await
++        }
++    });
++    tokio::time::sleep(Duration::from_millis(/*millis*/ 150)).await;
++    assert!(
++        !wait_task.is_finished(),
++        "a timeout with a colleague still working should not return to the model"
++    );
++
++    session
++        .input_queue
++        .enqueue_mailbox_communication(
++            InterAgentCommunication::new(
++                worker_path,
++                AgentPath::root(),
++                Vec::new(),
++                "found it".to_string(),
++                /*trigger_turn*/ false,
++            ),
++            Default::default(),
++        )
++        .await;
++    let output = timeout(Duration::from_secs(/*secs*/ 1), wait_task)
++        .await
++        .expect("mail should end the wait")
++        .expect("wait task should join")
++        .expect("wait_agent should succeed");
++    let (content, _) = expect_text_output(output);
++    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
++        serde_json::from_str(&content).expect("wait_agent result should be json");
++    assert_eq!(
++        (result.message.as_str(), result.timed_out),
++        ("Wait completed.", false)
++    );
++}
++
++#[tokio::test]
++async fn boss_main_wait_still_times_out_when_nobody_is_working() {
++    let (session, mut turn) = make_session_and_context().await;
++    let mut config = (*turn.config).clone();
++    for feature in [Feature::MultiAgentV2, Feature::BossMainDecisionLayer] {
++        config
++            .features
++            .enable(feature)
++            .expect("test config should allow feature update");
++    }
++    config.multi_agent_v2.min_wait_timeout_ms = 1;
++    config.multi_agent_v2.max_wait_timeout_ms = 1_000;
++    config.multi_agent_v2.default_wait_timeout_ms = 20;
++    set_turn_config(&mut turn, config);
++
++    let output = timeout(
++        Duration::from_secs(/*secs*/ 1),
++        WaitAgentHandlerV2::default().handle(invocation(
++            Arc::new(session),
++            Arc::new(turn),
++            "wait_agent",
++            function_payload(json!({})),
++        )),
++    )
++    .await
++    .expect("with nobody working the wait should expire")
++    .expect("wait_agent should succeed");
++    let (content, _) = expect_text_output(output);
++    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
++        serde_json::from_str(&content).expect("wait_agent result should be json");
++    assert_eq!(
++        (result.message.as_str(), result.timed_out),
++        ("Wait timed out.", true)
++    );
++}
++
++#[tokio::test]
++async fn boss_main_parked_after_a_hand_off_wakes_only_when_a_colleague_speaks() {
++    let (mut session, mut turn) = make_session_and_context().await;
++    let manager = thread_manager();
++    let root = manager
++        .start_thread(StartThreadOptions::new((*turn.config).clone()))
++        .await
++        .expect("root thread should start");
++    session.services.agent_control = manager.agent_control();
++    session.thread_id = root.thread_id;
++    let mut config = (*turn.config).clone();
++    config
++        .features
++        .enable(Feature::MultiAgentV2)
++        .expect("test config should allow feature update");
++    set_turn_config(&mut turn, config);
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++    let cancellation_token = CancellationToken::new();
++
++    // Nobody working: parking has nothing to wait for and returns at once.
++    timeout(
++        Duration::from_millis(/*millis*/ 200),
++        crate::session::turn::park_boss_main_while_colleagues_work(
++            &session,
++            &turn,
++            &cancellation_token,
++        ),
++    )
++    .await
++    .expect("with nobody working there is nothing to park for");
++
++    SpawnAgentHandlerV2::default()
++        .handle(invocation(
++            session.clone(),
++            turn.clone(),
++            "spawn_agent",
++            function_payload(json!({
++                "message": "boot worker",
++                "task_name": "worker"
++            })),
++        ))
++        .await
++        .expect("spawn worker");
++    let agent_id = session
++        .services
++        .agent_control
++        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
++        .await
++        .expect("relative path should resolve");
++    let worker_path = session
++        .services
++        .agent_control
++        .get_agent_metadata(agent_id)
++        .expect("worker metadata")
++        .agent_path
++        .expect("worker path");
++
++    let park = tokio::spawn({
++        let session = session.clone();
++        let turn = turn.clone();
++        let cancellation_token = cancellation_token.clone();
++        async move {
++            crate::session::turn::park_boss_main_while_colleagues_work(
++                &session,
++                &turn,
++                &cancellation_token,
++            )
++            .await;
++        }
++    });
++    tokio::time::sleep(Duration::from_millis(/*millis*/ 150)).await;
++    assert!(
++        !park.is_finished(),
++        "Boss main should stay off the model while its colleague works"
++    );
++
++    session
++        .input_queue
++        .enqueue_mailbox_communication(
++            InterAgentCommunication::new(
++                worker_path,
++                AgentPath::root(),
++                Vec::new(),
++                "found it".to_string(),
++                /*trigger_turn*/ false,
++            ),
++            Default::default(),
++        )
++        .await;
++    timeout(Duration::from_secs(/*secs*/ 1), park)
++        .await
++        .expect("a colleague message should end the park")
++        .expect("park task should join");
++}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
 index 40aecee0..85aca626 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
@@ -8244,7 +8781,7 @@ index 72c5ccd5..8057eb61 100644
  }
  
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
-index d2f92feb..c0c5bb8e 100644
+index d2f92feb..43fac84a 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
 @@ -1,4 +1,5 @@
@@ -8253,11 +8790,41 @@ index d2f92feb..c0c5bb8e 100644
  use crate::session::InputQueueActivity;
  use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
  use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
-@@ -93,7 +94,13 @@ impl Handler {
+@@ -68,7 +69,7 @@ impl Handler {
+             .input_queue
+             .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
+             .await;
+-        let (mut activity_rx, pending_activity) = session
++        let (mut activity_rx, mut pending_activity) = session
+             .input_queue
+             .subscribe_activity(turn_state.as_deref())
+             .await;
+@@ -91,9 +92,32 @@ impl Handler {
+             )
+             .await;
  
-         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-         let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
+-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+-        let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
 -        let result = WaitAgentResult::from_outcome(outcome, requested_timeout_ms, timeout_ms);
++        // A timeout that finds a colleague still working has nothing new to
++        // show Boss main, and handing it back only buys another full-context
++        // sample that decides to wait again. Keep waiting until a colleague
++        // speaks, the user steers, or nobody is working any more.
++        let park_while_colleagues_work = turn.config.boss_park_main_while_colleagues_work
++            && crate::tools::boss_main_execution_isolation_active(&turn);
++        let outcome = loop {
++            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
++            let outcome =
++                wait_for_activity(&mut activity_rx, pending_activity.take(), deadline).await;
++            if outcome == WaitOutcome::TimedOut
++                && park_while_colleagues_work
++                && timeout_ms > 0
++                && session.services.agent_control.any_colleague_working().await
++            {
++                continue;
++            }
++            break outcome;
++        };
 +        let colleagues = session
 +            .services
 +            .agent_control
@@ -8268,7 +8835,7 @@ index d2f92feb..c0c5bb8e 100644
  
          session
              .emit_turn_item_completed(
-@@ -133,6 +140,15 @@ struct WaitArgs {
+@@ -133,6 +157,15 @@ struct WaitArgs {
  pub(crate) struct WaitAgentResult {
      pub(crate) message: String,
      pub(crate) timed_out: bool,
@@ -8284,7 +8851,7 @@ index d2f92feb..c0c5bb8e 100644
  }
  
  impl WaitAgentResult {
-@@ -140,6 +156,7 @@ impl WaitAgentResult {
+@@ -140,6 +173,7 @@ impl WaitAgentResult {
          outcome: WaitOutcome,
          requested_timeout_ms: Option<i64>,
          timeout_ms: i64,
@@ -8292,7 +8859,7 @@ index d2f92feb..c0c5bb8e 100644
      ) -> Self {
          let message = match outcome {
              WaitOutcome::MailboxActivity => "Wait completed.",
-@@ -153,6 +170,7 @@ impl WaitAgentResult {
+@@ -153,6 +187,7 @@ impl WaitAgentResult {
              Some(_) | None => message.to_string(),
          };
          Self {
@@ -12134,10 +12701,10 @@ index f5a4648f..b17cbd3d 100644
                  {"type": "encrypted_content", "encrypted_content": "review this"}
              ]
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index ca0a84bf..d9c652c6 100644
+index ca0a84bf..5a236517 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
-@@ -264,6 +264,11 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+@@ -264,6 +264,12 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
          agent_max_threads: Some(6),
          agent_default_subagent_model: None,
          agent_default_subagent_reasoning_effort: None,
@@ -12145,6 +12712,7 @@ index ca0a84bf..d9c652c6 100644
 +        agent_compact_idle_colleagues_above_percent: None,
 +        boss_observation_rounds_per_turn: 2,
 +        boss_recent_evidence_tokens: 4_000,
++        boss_park_main_while_colleagues_work: true,
 +        boss_worker_dropped_stock_sections: Vec::new(),
          agent_interrupt_message_enabled: false,
          agent_max_depth: 1,
