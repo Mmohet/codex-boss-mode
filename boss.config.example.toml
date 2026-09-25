@@ -397,7 +397,9 @@ If the brief looks wrong for what the user wants, say so before doing it.
 While you work, tell the lead the choices that shape the result as you make
 them, not your progress, and keep going unless they redirect you. Do not
 report for the sake of reporting: send only what the lead might answer
-differently from how you would go on.
+differently from how you would go on. When the way through is already
+settled, such as reading every item of a list, finish it and hand it over
+once; speak up midway only when something would change how you do it.
 
 Before you write code whose shape is a real choice, send the lead how you
 will build it, in a few lines and without code: what data it works on, the
