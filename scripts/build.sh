@@ -1,23 +1,35 @@
 #!/bin/zsh
-# Build a patched Codex CLI matching the Codex Desktop you have installed.
+# Build a patched Codex CLI from a patch set this repository already has.
 #
-# The patch is small and touches slow-moving seams, so it three-way applies
-# across a range of upstream versions rather than only its own baseline. This
-# script therefore targets *your installed version*, applies the nearest patch
-# set to it, and only stops if the merge actually fails. The signed app bundle
-# is never modified; the patched binary is staged next to a link to the stock
-# code-mode host and loaded through CODEX_CLI_PATH by bin/codex-boss.
+# By default it builds the patch set for your installed Desktop version when
+# one exists, and otherwise the newest patch set on its own baseline, so a plain
+# rebuild never depends on a merge nobody has reviewed. Following a Desktop
+# update onto a version with no patch set yet is scripts/update.sh's job: it
+# sets BOSS_TARGET to the installed version, and the patch, being small and on
+# slow-moving seams, usually three-way applies there; the build only stops if
+# the merge actually fails. The signed app bundle is never modified; the
+# patched binary is staged next to a code-mode host built from the same source
+# and loaded through CODEX_CLI_PATH by bin/codex-boss.
 set -euo pipefail
 SCRIPT_NAME=build
 REPO_ROOT="$(cd "$(dirname "${(%):-%x}")/.." && pwd)"
 source "$REPO_ROOT/scripts/common.sh"
 
-# Target the installed Desktop, not the patch's baseline. Overridable for
-# deliberately building a mismatched pair.
+# Target a version this repository has a patch set for: the installed
+# Desktop's if there is one, otherwise the newest. BOSS_TARGET names any other
+# version, which is merged onto from the nearest patch set below.
+installed_tag="rust-v$(boss_bundle_version)"
 if [[ -n "${BOSS_TARGET:-}" ]]; then
   TARGET="$BOSS_TARGET"
+  target_origin="from BOSS_TARGET"
+  [[ "$TARGET" == "$installed_tag" ]] && target_origin="the installed Codex Desktop"
+elif [[ -d "$REPO_ROOT/patches/$installed_tag" ]]; then
+  TARGET="$installed_tag"
+  target_origin="the installed Codex Desktop"
 else
-  TARGET="rust-v$(boss_bundle_version)"
+  TARGET="$(ls "$REPO_ROOT/patches" | sort -V | tail -1)"
+  [[ -n "$TARGET" ]] || fail "no patch sets in $REPO_ROOT/patches"
+  target_origin="newest patch set; Desktop is ${installed_tag#rust-v}, follow it with scripts/update.sh"
 fi
 
 # Nearest patch set: an exact match if this repo has one, otherwise the newest.
@@ -29,7 +41,7 @@ else
 fi
 PATCH_DIR="$REPO_ROOT/patches/$PATCH_SET"
 
-note "target      : $TARGET  (from the installed Codex Desktop)"
+note "target      : $TARGET  ($target_origin)"
 if [[ "$PATCH_SET" == "$TARGET" ]]; then
   note "patch set   : $PATCH_SET  (exact match)"
 else
@@ -45,7 +57,7 @@ if [[ ! -d "$UPSTREAM_DIR/.git" ]]; then
   git clone --depth 1 --branch "$TARGET" "$UPSTREAM_URL" "$UPSTREAM_DIR" \
     || fail "could not clone $UPSTREAM_URL at $TARGET
   If that tag does not exist upstream, check what Codex Desktop reports:
-    $APP/Contents/Resources/codex --version"
+    $(boss_bundle_bin)/codex --version"
 else
   current=$( cd "$UPSTREAM_DIR" && git describe --tags --exact-match HEAD 2>/dev/null || print "" )
   if [[ "$current" != "$TARGET" ]]; then

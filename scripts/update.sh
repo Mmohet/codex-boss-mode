@@ -1,8 +1,8 @@
 #!/bin/zsh
 # Bring Boss Mode back in step with a Codex Desktop that updated itself.
 #
-# Desktop updates replace the bundled CLI and the code-mode host the Boss binary
-# links to, leaving an old CLI talking to a new helper. This rebuilds against
+# Desktop updates replace the bundled CLI, leaving the new app talking to an
+# older Boss binary. This rebuilds against
 # whatever is installed now. It never restarts anything: relaunch when it suits
 # you.
 set -euo pipefail
@@ -40,4 +40,4 @@ if [[ -d "$UPSTREAM_DIR/.git" ]]; then
   fi
 fi
 
-exec "$REPO_ROOT/scripts/build.sh"
+exec env BOSS_TARGET="$target" "$REPO_ROOT/scripts/build.sh"

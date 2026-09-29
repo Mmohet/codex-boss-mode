@@ -10,7 +10,7 @@ flowchart LR
   P --> S[maintenance skill\nskills/codex-boss-maintenance]
   P -. reads .boss/workspace.local.toml .-> L
   L[local manifest\ngitignored absolute paths] --> C[Codex Desktop bundle]
-  L --> R[live Boss profile\nbase / main / binary / host link]
+  L --> R[live Boss profile\nbase / main / binary / host]
   L --> U[source checkout\nlocal boss-mode branch]
   U --> O[OpenAI Codex upstream\npinned baseline tag]
   U --> F[Codex fork\npushed boss-mode branch\nsource-development only]

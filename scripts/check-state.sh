@@ -225,7 +225,7 @@ note "live Boss files"
 check_file "live profile" "$LIVE_PROFILE"
 check_dir "live Boss directory" "$LIVE_BOSS_DIR"
 check_file "live Boss binary" "$LIVE_BOSS_BINARY"
-check_file "live code-mode host link" "$LIVE_HOST"
+check_file "live code-mode host" "$LIVE_HOST"
 check_file "live launcher" "$LIVE_LAUNCHER"
 check_dir "Codex home" "$CODEX_HOME_PATH"
 check_dir "Desktop app" "$DESKTOP_APP"
@@ -290,7 +290,11 @@ if [[ -x "$LIVE_BOSS_BINARY" ]]; then
 else
   drift "live Boss binary is not executable"
 fi
-bundle_cli="$DESKTOP_APP/Contents/Resources/codex"
+# Newer Desktop builds keep the bundled CLI in codex-cli/bin, older ones in
+# Resources.
+bundle_bin="$DESKTOP_APP/Contents/Resources/codex-cli/bin"
+[[ -x "$bundle_bin/codex" ]] || bundle_bin="$DESKTOP_APP/Contents/Resources"
+bundle_cli="$bundle_bin/codex"
 if [[ -x "$bundle_cli" ]]; then
   bundle_version="$(binary_version "$bundle_cli" || print unknown)"
   info "Desktop bundle CLI version=$bundle_version"
@@ -299,9 +303,7 @@ else
   drift "Desktop bundle CLI missing: $bundle_cli"
 fi
 
-host_target="$(readlink "$LIVE_HOST" 2>/dev/null || print none)"
-expected_host="$DESKTOP_APP/Contents/Resources/codex-code-mode-host"
-[[ "$host_target" == "$expected_host" ]] && ok "code-mode host link targets the installed Desktop" || drift "code-mode host target=$host_target (expected=$expected_host)"
+[[ -x "$LIVE_HOST" && ! -L "$LIVE_HOST" ]] && ok "code-mode host is built alongside the Boss binary" || drift "code-mode host is not a built copy: $LIVE_HOST"
 
 print ""
 note "build and update scripts"

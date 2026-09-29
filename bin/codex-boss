@@ -50,19 +50,25 @@ fail() { print -u2 "codex-boss: $1"; exit 1 }
   set CODEX_APP if it is installed somewhere else"
 
 # Codex resolves the code-mode host as a sibling of its own executable, so the
-# patched binary has to sit next to a link to the stock one. scripts/build.sh
-# creates that link.
-[[ -e "${BOSS_CLI:h}/codex-code-mode-host" ]] || print -u2 \
-  "codex-boss: warning: codex-code-mode-host is missing next to $BOSS_CLI; code-mode tools will fail"
+# patched binary has to sit next to one built from the same source.
+# scripts/build.sh installs it.
+[[ -x "${BOSS_CLI:h}/codex-code-mode-host" && ! -L "${BOSS_CLI:h}/codex-code-mode-host" ]] || print -u2 \
+  "codex-boss: warning: no code-mode host built with $BOSS_CLI; code-mode tools will fail
+  rebuild with: bin/codex-boss build"
 
 # Confirm the binary actually runs before handing it to the app.
 BOSS_VER="$("$BOSS_CLI" --version 2>/dev/null)" || fail "patched binary will not run: $BOSS_CLI"
 
 # The Boss binary is a copy, so a Desktop update replaces the bundled one and
-# leaves this one behind. That matters more than it looks: codex-code-mode-host
-# is a link into the bundle, so after an update an old Boss binary talks to a
-# new helper. Compare the two rather than relying on memory.
-BUNDLE_VER="$("$APP/Contents/Resources/codex" --version 2>/dev/null || true)"
+# leaves this one behind, and the new app then talks to an older CLI. Compare
+# the two rather than relying on memory.
+# Newer Desktop builds keep the bundled CLI in codex-cli/bin, older ones in
+# Resources.
+BUNDLE_BIN="$APP/Contents/Resources/codex-cli/bin"
+[[ -x "$BUNDLE_BIN/codex" ]] || BUNDLE_BIN="$APP/Contents/Resources"
+BUNDLE_VER="$("$BUNDLE_BIN/codex" --version 2>/dev/null || true)"
+[[ -n "$BUNDLE_VER" ]] || print -u2 \
+  "codex-boss: warning: cannot find the bundled CLI in $APP; the version check below is skipped"
 DRIFTED=0
 [[ -n "$BUNDLE_VER" && "$BOSS_VER" != "$BUNDLE_VER" ]] && DRIFTED=1
 

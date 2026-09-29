@@ -69,7 +69,7 @@ layered on rather than substituted.
 ```
 
 `build.sh` fetches upstream Codex at the pinned baseline, applies the patch,
-builds a release CLI, and stages it next to a link to the stock code-mode host.
+builds a release CLI and its code-mode host from the same source, and stages them together.
 `bin/codex-boss` launches Codex Desktop with `CODEX_CLI_PATH` and
 `CODEX_CONFIG_PROFILE` pointed at it. `bin/codex-normal` launches stock.
 Inside Boss Mode the model picker also picks the mode, turn by turn: a model
@@ -117,9 +117,9 @@ ceiling.
 
 ## Keeping up with Codex updates
 
-Codex Desktop updates itself. That replaces the bundled CLI **and** the
-code-mode host your patched binary links to, so an old Boss binary ends up
-talking to a new helper. `bin/codex-boss` detects the mismatch and says so.
+Codex Desktop updates itself. That replaces the bundled CLI, so the new app
+ends up talking to an older Boss binary. `bin/codex-boss` detects the mismatch
+and says so.
 
 ```bash
 ./scripts/update.sh
@@ -139,12 +139,17 @@ bin/codex-boss          # launch Boss Mode
 
 ### The patch follows versions on its own
 
-You do not need a patch set for your exact Codex version. The build always
-targets *your installed version*; if this repository has no exact match it takes
-the nearest patch set, fetches that baseline so `git apply` has real three-way
+You do not need a patch set for your exact Codex version. `update` targets
+*your installed version*; if this repository has no exact match it takes the
+nearest patch set, fetches that baseline so `git apply` has real three-way
 merge material, and merges the patch onto your version. It stops only if the
 merge genuinely conflicts, and then it names the conflicting files and leaves
 the checkout in place so you can finish by hand.
+
+`build` on its own stays on a patch set this repository already has: your
+installed version's when there is one, otherwise the newest patch set on its
+own baseline. A Desktop update therefore never turns a routine rebuild into an
+unreviewed merge. Set `BOSS_TARGET=<tag>` to build any other version.
 
 The patch is small and touches slow-moving seams, which is why this works.
 Measured against a `rust-v0.153.0` patch set:

@@ -51,7 +51,7 @@ concrete failure or clearly superior general rule justifies changing it.
 ## Lane A: Runtime/Patch maintenance
 
 Use this lane when Codex Desktop or the upstream Codex source changed, the Boss
-binary and Desktop CLI disagree, the host link moved, or a patch needs to be
+binary and Desktop CLI disagree, the code-mode host is missing, or a patch needs to be
 rebuilt.
 
 1. Run `scripts/check-state.sh --remote` and record the installed Desktop
@@ -61,10 +61,12 @@ rebuilt.
    `scripts/check-state.sh --local --repair-mechanical-lock` only when the
    checker proves that the tracked change is the exact mechanical Cargo.lock
    normalization. Other tracked changes remain drift and require inspection.
-3. Run `scripts/update.sh` when the Desktop version changed, or
-   `scripts/build.sh` when the target is explicit. These scripts select the
-   installed version, use the nearest versioned patch, and keep the signed app
-   bundle untouched.
+3. Run `scripts/update.sh` when the Desktop version changed; it targets the
+   installed version and merges the nearest versioned patch onto it. Run
+   `scripts/build.sh` to rebuild what the repository already has: the installed
+   version's patch set if one exists, otherwise the newest patch set on its own
+   baseline, or `BOSS_TARGET=<tag>` for an explicit target. Both keep the
+   signed app bundle untouched.
 4. Run `scripts/test.sh --cargo` when the patch was applied or regenerated.
    The cheap checks in `scripts/test.sh` remain useful when a compiler run is
    intentionally deferred.
@@ -196,6 +198,6 @@ or a clearly superior general rule justifies a separate change.
 
 Finish with fresh evidence: the state check, the selected runtime tests or the
 prompt diff/review, changed files, and unresolved boundaries. Do not claim that
-runtime maintenance is complete when the binary version, host link, profile
+runtime maintenance is complete when the binary version, code-mode host, profile
 references, or source patch are still unverified. Do not claim prompt
 maintenance is complete when a full prompt copy replaced a considered decision.
