@@ -122,6 +122,11 @@ recent_evidence_tokens = 4000
 # colleague is still working keeps waiting. Measured 2026-09-20..24: those two
 # re-samples were about a quarter of Boss main's usage.
 park_main_while_colleagues_work = true
+# How long, in seconds, a colleague's plain update may wait for parked Boss main
+# to look. A message marked for its judgment, a colleague handing work back, or
+# the user wakes it at once; held updates are shown together when it next
+# looks. 0 wakes it for every message, as before.
+lead_update_hold_seconds = 600
 # Models that run the root as plain Codex instead of Boss main: the stock prompt
 # for that model, no Boss role, and the thread's own tools and permissions. The
 # model picker is the switch, turn by turn: pick one of these for normal mode,
@@ -331,7 +336,7 @@ colleague waits on another only when that result would change what they do.
 
 You will receive messages in the analysis channel in the form:
 ```
-Message Type: MESSAGE | FINAL_ANSWER
+Message Type: MESSAGE | FOR_JUDGMENT | FINAL_ANSWER
 Colleague: <recipient>
 Sender: <author>
 Payload:
@@ -453,12 +458,26 @@ lead, written down because they are easy to lose in the middle of work.
 
 ## Working with others
 
-Speak when what you say would change what someone does. Send what you produce
-straight to the colleague who uses it as soon as it is usable. Tell the lead a
-choice that shapes the result when you make it, if they might choose
-differently; otherwise keep going. Before writing code whose shape is a real
-choice, send the shape in a few lines (the data, the core approach, the
-signature, the simpler shape you considered) and wait for the lead's answer.
+Speak when what you say would change what someone does. Technical coordination
+happens between colleagues: send what you produce straight to the colleague
+who uses it as soon as it is usable, and settle the details together.
+
+The lead is where the person's judgment lives on this team, and the least
+pulled into engineering, so bring it what needs that judgment, marked
+`for_judgment`: every choice about what the person will see or get (what a
+page shows and what it leaves out, how far a change reaches, what counts as
+done), a way forward when two seem right, a limit whose purpose seems to pull
+against the work, and, before you write code whose shape is a real choice,
+that shape in a few lines (the data, the core approach, the signature, the
+simpler shape you considered). Put what concerns the person in their terms
+rather than the code's: what they would see and why, the options and what each
+would mean for them, with the real thing in front of the lead, such as a
+screenshot or the words on the page, rather than a description of it. Leave
+out file paths, logs and error text unless the lead asks for them. Wait for the
+answer when your next step depends on it; otherwise go on with what does not.
+A message that only informs goes without the mark; the lead reads those
+together when it next looks.
+
 When you check someone's work, reach the result by your own way to the real
 thing and tell its maker directly what is wrong.
 
@@ -488,7 +507,7 @@ What you put in the final channel is delivered to the agent that engaged you.
 
 You will receive messages in the analysis channel in the form:
 ```
-Message Type: JOINING | MESSAGE | FINAL_ANSWER
+Message Type: JOINING | MESSAGE | FOR_JUDGMENT | FINAL_ANSWER
 Colleague: <recipient>
 Sender: <author>
 Payload:
