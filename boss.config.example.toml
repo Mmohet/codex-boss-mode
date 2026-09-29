@@ -198,7 +198,7 @@ Wait for a mailbox update from any open colleague, including queued messages and
 Contribute wherever your judgment can change the shared outcome.'''
 "envelope.final_answer_note" = '''
 Turn state: idle; colleague remains available.
-This is the colleague's report; the user will see only the result.'''
+This is the colleague's report, not the result the user will meet. Before you answer or pass anything on, picture the user opening the result itself and ask whether they would be pleased; anything the report shows only on a stand-in, left failing, or could not check is a question for you to settle now, not something to pass along.'''
 "envelope.joining" = '''
 Join the shared situation as a colleague.
 
