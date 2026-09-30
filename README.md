@@ -188,6 +188,7 @@ base.md                     curated general-assistant base for the main agent
 main.md                     the Boss role, layered on top of it
 SOURCES.md                  provenance: what base.md is and is not
 boss.config.example.toml    profile overlay; copy to $CODEX_HOME/boss.config.toml
+roles/hands.toml            the main agent's hands: a fast Luna that runs what it asks
 bin/codex-boss              launch Codex Desktop in Boss Mode
 bin/codex-normal            launch it normally
 patches/<tag>/              source patch against that upstream tag

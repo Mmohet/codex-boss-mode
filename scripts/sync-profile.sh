@@ -55,6 +55,8 @@ cp -p "$REPO_ROOT/main.md" "$WORK_DIR/main.md" \
   || fail "could not stage $REPO_ROOT/main.md"
 cp -p "$REPO_ROOT/scripts/claude-collab.sh" "$WORK_DIR/claude-collab.sh" \
   || fail "could not stage $REPO_ROOT/scripts/claude-collab.sh"
+cp -p "$REPO_ROOT/roles/hands.toml" "$WORK_DIR/hands.toml" \
+  || fail "could not stage $REPO_ROOT/roles/hands.toml"
 
 awk 'BEGIN { print "developer_instructions = \"\"\"" }
      { print }
@@ -390,10 +392,13 @@ mv -f "$WORK_DIR/main.md" "$DEST/main.md" \
   || fail "could not atomically install $DEST/main.md"
 mv -f "$WORK_DIR/claude-collab.sh" "$DEST/claude-collab.sh" \
   || fail "could not atomically install $DEST/claude-collab.sh"
+mkdir -p "$DEST/roles" || fail "could not create $DEST/roles"
+mv -f "$WORK_DIR/hands.toml" "$DEST/roles/hands.toml" \
+  || fail "could not atomically install $DEST/roles/hands.toml"
 mv -f "$PROFILE_TMP" "$PROFILE_FILE" \
   || fail "could not atomically install $PROFILE_FILE"
 PROFILE_TMP=""
 
-print "$SCRIPT_NAME: synced $DEST/base.md, $DEST/main.md, and $DEST/claude-collab.sh"
+print "$SCRIPT_NAME: synced $DEST/base.md, $DEST/main.md, $DEST/claude-collab.sh, and $DEST/roles/hands.toml"
 print "$SCRIPT_NAME: updated developer_instructions, tool_namespace, root_agent_usage_hint_text, multi_agent_mode_hint_text, subagent_developer_instructions, subagent_usage_hint_text, and the [boss] tables in $PROFILE_FILE"
 print "$SCRIPT_NAME: profile backup: $BACKUP"

@@ -24,6 +24,9 @@ for f in base.md main.md SOURCES.md; do
 done
 cp -p "$REPO_ROOT/scripts/claude-collab.sh" "$DEST/claude-collab.sh"
 print "$SCRIPT_NAME: installed $DEST/claude-collab.sh"
+mkdir -p "$DEST/roles"
+cp "$REPO_ROOT/roles/hands.toml" "$DEST/roles/hands.toml"
+print "$SCRIPT_NAME: installed $DEST/roles/hands.toml"
 
 if [[ -e "$PROFILE_FILE" ]]; then
   print -u2 "$SCRIPT_NAME: $PROFILE_FILE already exists; leaving it alone."
